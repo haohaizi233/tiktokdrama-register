@@ -1,0 +1,24 @@
+# ===== 敏感数据（绝不入库）=====
+账号.txt
+资料.txt
+accounts.json
+pool_data/
+auth/
+资料/
+资料不全/
+logs/
+gui.log
+
+# ===== 日志 =====
+*.log
+
+# ===== Python =====
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# ===== IDE =====
+.idea/
+.vscode/

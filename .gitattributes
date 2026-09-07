@@ -1,0 +1,2 @@
+# bat 为 GBK+CRLF 编码，按二进制存储防止 git 篡改换行/编码
+*.bat binary

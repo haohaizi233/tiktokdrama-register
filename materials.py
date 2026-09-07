@@ -1,0 +1,397 @@
+# -*- coding: utf-8 -*-
+"""企业资料解析: 资料/ 文件夹 + 汇总xlsx → 公司档案, 供企业认证自动化使用
+
+数据源(同格式资料可重复使用):
+- 资料/*.xlsx        汇总表, 每行一家公司, 列序固定:
+    A公司名 B注册编号 C注册州 D注册城市 E注册地址
+    F代表人姓名 G出生日期 H证件号 I证件有效期
+    J居住州 K居住城市 L居住地址
+- 资料/{公司名}/     该公司文件: 州注册文件(AOG/注册回执/Correspondence)、CP575、证件照片
+- 资料/overrides.json 可选, 人工指定文件角色: {"公司名": {"id_front": "文件名", ...}}
+- 资料/usage.json    自动维护, 记录每家公司绑定到哪个邮箱、认证结果
+
+文件角色自动识别规则:
+- 州注册文件(企业营业证明): 文件名含 "-AOG-" > "Business Entity Filing Acknowledgment" > "Correspondence"
+- CP575(EIN税号信, 用作代表人证明): 文件名匹配 cp575
+- 证件照: front.jpg/back.jpg/selfie* 命名, 或数字命名 1=正面 2=背面 3.*=手持/自拍
+"""
+import json
+import re
+import shutil
+from datetime import date, datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+MATERIALS_DIR = ROOT / "资料"
+USAGE_FILE = MATERIALS_DIR / "usage.json"
+OVERRIDES_FILE = MATERIALS_DIR / "overrides.json"
+
+IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+BLOCKERS = ("biz_proof", "cp575", "id_front", "id_back",
+            "reg_no", "reg_state", "reg_city", "reg_addr",
+            "rep_name", "rep_birth", "id_no", "id_exp")
+
+COLUMNS = ("company", "reg_no", "reg_state", "reg_city", "reg_addr",
+           "rep_name", "rep_birth", "id_no", "id_exp",
+           "rep_state", "rep_city", "rep_addr")
+
+
+# ---------- 基础工具 ----------
+
+def _read_json(path: Path, default):
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return default
+
+
+def _write_json(path: Path, data) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _norm_date(v) -> str:
+    """xlsx单元格/字符串 → YYYY-MM-DD"""
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d")
+    if isinstance(v, date):
+        return v.strftime("%Y-%m-%d")
+    s = str(v or "").strip()
+    m = re.match(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", s)
+    if m:
+        return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})", s)
+    if m:
+        return f"{int(m.group(3)):04d}-{int(m.group(1)):02d}-{int(m.group(2)):02d}"
+    return s
+
+
+def _norm_text(v) -> str:
+    return re.sub(r"\s+", " ", str(v or "").strip())
+
+
+# ---------- xlsx 汇总表 ----------
+
+def load_xlsx_rows() -> list[dict]:
+    """读取 资料/ 下最新的xlsx汇总表 → 原始行列表(仅含公司名列非空的行)"""
+    import openpyxl
+    files = sorted(MATERIALS_DIR.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
+    rows = []
+    for f in files:
+        try:
+            wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
+        except Exception:
+            continue
+        for ws in wb.worksheets:
+            for row in ws.iter_rows(values_only=True):
+                if not row or not _norm_text(row[0]):
+                    continue
+                rec = {}
+                for i, key in enumerate(COLUMNS):
+                    rec[key] = row[i] if i < len(row) else None
+                rows.append(rec)
+        wb.close()
+        if rows:
+            break
+    return rows
+
+
+# ---------- 文件角色识别 ----------
+
+def _match_biz_proof(files: list[Path]) -> Path | None:
+    for f in files:
+        if "-AOG-" in f.name.upper():
+            return f
+    for f in files:
+        if "Business Entity Filing".lower() in f.name.lower():
+            return f
+    for f in files:
+        if "correspondence" in f.name.lower():
+            return f
+    return None
+
+
+def _match_cp575(files: list[Path]) -> Path | None:
+    for f in files:
+        if re.search(r"cp.?575", f.name, re.I):
+            return f
+    return None
+
+
+def _match_id_images(images: list[Path]) -> dict:
+    """证件照识别: front/back/selfie 命名 或 1/2/3 数字命名"""
+    out = {"id_front": None, "id_back": None, "id_selfie": None}
+    rest = []
+    for f in images:
+        low = f.name.lower()
+        if low.startswith("front"):
+            out["id_front"] = f
+        elif low.startswith("back"):
+            out["id_back"] = f
+        elif low.startswith("selfie"):
+            out["id_selfie"] = out["id_selfie"] or f
+        else:
+            rest.append(f)
+    if not out["id_front"]:
+        for f in rest:
+            if re.match(r"^1\.(jpg|jpeg|png|webp)$", f.name, re.I):
+                out["id_front"] = f
+    if not out["id_back"]:
+        for f in rest:
+            if re.match(r"^2\.(jpg|jpeg|png|webp)$", f.name, re.I):
+                out["id_back"] = f
+    if not out["id_selfie"]:
+        for f in rest:
+            if re.match(r"^3(\(\d+\))?\.(jpg|jpeg|png|webp)$", f.name, re.I):
+                out["id_selfie"] = f
+                break
+    return out
+
+
+def find_folder(company: str) -> Path | None:
+    if not (MATERIALS_DIR.is_dir()):
+        return None
+    exact = MATERIALS_DIR / company
+    if exact.is_dir():
+        return exact
+    low = company.strip().lower()
+    for d in MATERIALS_DIR.iterdir():
+        if d.is_dir() and d.name.strip().lower() == low:
+            return d
+    return None
+
+
+def _apply_overrides(company: str, files: dict) -> dict:
+    ov = _read_json(OVERRIDES_FILE, {})
+    conf = ov.get(company) or {}
+    folder = find_folder(company)
+    for role, name in conf.items():
+        if role in files and name:
+            p = folder / name if folder else None
+            if p and p.exists():
+                files[role] = p
+    return files
+
+
+# ---------- 公司档案 ----------
+
+def profiles() -> list[dict]:
+    """全部公司档案(含文件与数据校验结果), 按xlsx行序"""
+    result = []
+    for row in load_xlsx_rows():
+        company = _norm_text(row.get("company"))
+        if not company:
+            continue
+        p = {
+            "name": company,
+            "reg_no": _norm_text(row.get("reg_no")),
+            "reg_state": _norm_text(row.get("reg_state")).upper(),
+            "reg_city": _norm_text(row.get("reg_city")).title(),
+            "reg_addr": _norm_text(row.get("reg_addr")),
+            "rep_name": _norm_text(row.get("rep_name")).title(),
+            "rep_birth": _norm_date(row.get("rep_birth")),
+            "id_no": _norm_text(row.get("id_no")),
+            "id_exp": _norm_date(row.get("id_exp")),
+            "rep_state": _norm_text(row.get("rep_state")).upper(),
+            "rep_city": _norm_text(row.get("rep_city")).title(),
+            "rep_addr": _norm_text(row.get("rep_addr")),
+            "folder": None,
+            "biz_proof": None, "cp575": None,
+            "id_front": None, "id_back": None, "id_selfie": None,
+            "issues": [],
+        }
+        folder = find_folder(company)
+        if not folder:
+            p["issues"].append("资料文件夹不存在")
+        else:
+            p["folder"] = str(folder)
+            files = [f for f in folder.iterdir() if f.is_file()]
+            images = [f for f in files if f.suffix.lower() in IMG_EXTS]
+            p["biz_proof"] = _match_biz_proof(files)
+            p["cp575"] = _match_cp575(files)
+            p.update(_match_id_images(images))
+            p = _apply_overrides(company, p)
+        today = date.today().isoformat()
+        for k in ("reg_no", "reg_state", "reg_city", "reg_addr",
+                  "rep_name", "rep_birth", "id_no", "id_exp"):
+            if not p[k]:
+                p["issues"].append(f"缺少数据:{k}")
+        if p["rep_birth"] and p["rep_birth"] >= today:
+            p["issues"].append("出生日期异常")
+        if p["id_exp"] and p["id_exp"] <= today:
+            p["issues"].append(f"证件有效期已过期({p['id_exp']})")
+        for k in ("biz_proof", "cp575", "id_front", "id_back"):
+            if not p[k]:
+                p["issues"].append(f"缺少文件:{k}")
+        p["complete"] = not p["issues"]
+        result.append(p)
+    # 同名去重(后者覆盖)
+    dedup = {}
+    for p in result:
+        dedup[p["name"]] = p
+    return list(dedup.values())
+
+
+# ---------- 用量跟踪 ----------
+
+def load_usage() -> dict:
+    return _read_json(USAGE_FILE, {})
+
+
+def save_usage(usage: dict) -> None:
+    MATERIALS_DIR.mkdir(exist_ok=True)
+    _write_json(USAGE_FILE, usage)
+
+
+def mark_usage(company: str, email: str, status: str, note: str = "") -> None:
+    usage = load_usage()
+    usage[company] = {
+        "email": email,
+        "status": status,  # assigned / submitted / failed
+        "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "note": note,
+    }
+    save_usage(usage)
+
+
+def release_usage(company: str) -> bool:
+    """解除公司绑定回收复用。仅未提交(assigned/failed)才释放;
+
+    submitted=已成功绑定账号, 释放会导致一司二号, 一律拒绝(返回False)。
+    """
+    usage = load_usage()
+    entry = usage.get(company)
+    if not entry or entry.get("status") == "submitted":
+        return False
+    del usage[company]
+    save_usage(usage)
+    return True
+
+
+def pick_company() -> dict | None:
+    """挑一家未使用且资料完整的公司(按xlsx行序)"""
+    usage = load_usage()
+    for p in profiles():
+        if p["name"] in usage:
+            continue
+        if p["complete"]:
+            return p
+    return None
+
+
+def summary() -> tuple[int, int, list[str]]:
+    """(完整可用数, 已绑定数, 问题公司列表)"""
+    usage = load_usage()
+    allp = profiles()
+    used = [p for p in allp if p["name"] in usage]
+    ok = [p for p in allp if p["complete"] and p["name"] not in usage]
+    problems = [f"{p['name']}: {'; '.join(p['issues'])}" for p in allp if not p["complete"]]
+    return len(ok), len(used), problems
+
+
+# ---------- 资料不全归档 ----------
+
+def incomplete_companies() -> tuple[list[dict], list[dict]]:
+    """(可归档的资料不全公司, 因已绑定而保留的资料不全公司)"""
+    usage = load_usage()
+    allp = profiles()
+    unbound = [p for p in allp if not p["complete"] and p["name"] not in usage]
+    bound = [p for p in allp if not p["complete"] and p["name"] in usage]
+    return unbound, bound
+
+
+def _drop_xlsx_rows(names: set[str], backup: Path) -> Path | None:
+    """从当前生效的xlsx汇总表删除指定公司的行, 删除前把原表复制到backup路径。
+
+    生效表与load_xlsx_rows同语义: 按mtime取最新的"含数据"表。
+    返回被修改的xlsx路径; 表被占用/无法保存返回None。
+    """
+    import openpyxl
+    for f in sorted(MATERIALS_DIR.glob("*.xlsx"),
+                    key=lambda p: p.stat().st_mtime, reverse=True):
+        try:
+            wb = openpyxl.load_workbook(f)
+        except Exception:
+            continue
+        drops = {}
+        has_row = False
+        for ws in wb.worksheets:
+            idx = []
+            for i, row in enumerate(ws.iter_rows(values_only=True), start=1):
+                if not row:
+                    continue
+                name = _norm_text(row[0])
+                if name:
+                    has_row = True
+                if name in names:
+                    idx.append(i)
+            if idx:
+                drops[ws] = idx
+        if not has_row:
+            wb.close()
+            continue
+        if drops:
+            for ws, idx in drops.items():
+                for i in reversed(idx):
+                    ws.delete_rows(i)
+            try:
+                backup.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(f, backup)
+                wb.save(f)
+            except OSError:
+                wb.close()
+                return None
+        wb.close()
+        return f
+    return None
+
+
+def archive_incomplete() -> dict:
+    """把资料不全且未绑定的公司归档到 资料/资料不全/:
+    ①xlsx汇总表先备份到归档目录, 再删除这些公司的行(删除失败整体中止, 不动任何文件夹)
+    ②公司文件夹整体移入归档目录(没有文件夹的仅删表行; 归档目录已有同名文件夹则跳过移动)
+    ③overrides.json清理这些公司的条目
+    已绑定(usage.json)的公司一律不归档(保留绑定历史)。
+    返回 {archived:[{name,issues,folder,error}], backup, xlsx, errors}
+    """
+    targets, _ = incomplete_companies()
+    report = {"archived": [], "backup": None, "xlsx": None, "errors": []}
+    if not targets:
+        return report
+    names = {p["name"] for p in targets}
+    archive_dir = MATERIALS_DIR / "资料不全"
+
+    # ① 先处理xlsx: 失败(可能被Excel占用)则整体中止, 避免出现半归档状态
+    backup = archive_dir / f"汇总表备份_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    xlsx = _drop_xlsx_rows(names, backup)
+    if xlsx is None:
+        report["errors"].append(
+            "xlsx汇总表删除失败(可能正被Excel打开占用), 未做任何移动, 未归档")
+        return report
+    report["xlsx"] = str(xlsx)
+    report["backup"] = str(backup)
+
+    # ② 文件夹移入归档目录
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    for p in targets:
+        entry = {"name": p["name"], "issues": p["issues"],
+                 "folder": None, "error": None}
+        folder = find_folder(p["name"])
+        if folder:
+            dest = archive_dir / folder.name
+            if dest.exists():
+                entry["error"] = "归档目录已有同名文件夹, 未移动(表行已删)"
+            else:
+                try:
+                    shutil.move(str(folder), str(dest))
+                    entry["folder"] = str(dest)
+                except OSError as e:
+                    entry["error"] = f"文件夹移动失败(表行已删): {e}"
+        report["archived"].append(entry)
+
+    # ③ 清理overrides.json中这些公司的条目
+    ov = _read_json(OVERRIDES_FILE, {})
+    if any(n in ov for n in names):
+        for n in names:
+            ov.pop(n, None)
+        _write_json(OVERRIDES_FILE, ov)
+    return report
