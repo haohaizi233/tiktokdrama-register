@@ -1,0 +1,543 @@
+Aurora Scientific Research Institute
+Nova Physics Institute
+Orion Astrophysics Laboratory
+Ceres Geoscience Academy
+Lyra Bioscience Research Centre
+Atlas Material Science Institute
+Epsilon Environmental Research Institute
+Thalassa Marine Science Academy
+Helios Energy Research Laboratory
+Iris Molecular Biology Institute
+Aether Quantum Research Centre
+Vesta Computational Science Institute
+Phoenix Biomedical Research Institute
+Calypso Climate Research Academy
+Titan Advanced Technology Lab
+Selene Space Science Institute
+Kora Agricultural Research Centre
+Zeno Cognitive Science Institute
+Flora Ecological Research Academy
+Magnus Chemical Science Institute
+Lumen Optics Research Lab
+Orbit Aerospace Research Institute
+Pax Public Health Research Centre
+Ferro Metallurgy Research Academy
+Celeste Geophysics Institute
+Delta Food Science Research Lab
+Nereid Oceanographic Institute
+Solis Sustainable Research Academy
+Echo Audio Science Institute
+Radian Radiation Research Centre
+Meridian Geological Institute
+Themis Biotech Research Lab
+Altair Robotics Research Institute
+Boreas Atmospheric Research Academy
+Caelum Plasma Science Institute
+Daphne Plant Science Research Centre
+Eos Solar Energy Institute
+Fortuna Medicinal Research Lab
+Gaea Soil Science Academy
+Hyperion Solid State Physics Institute
+Icarus Propulsion Research Centre
+Juno Analytical Chemistry Institute
+Kael Neuroscience Research Lab
+Lira Biophysics Academy
+Mizar Remote Sensing Institute
+Nox Cryogenic Research Centre
+Onyx Polymer Science Institute
+Pallas Mineral Research Lab
+Quasar High Energy Physics Academy
+Rhea Hydrological Research Institute
+Sirius Nanotechnology Centre
+Tethys Freshwater Science Institute
+Uriel Medical Physics Lab
+Vela Fusion Energy Academy
+Woden Structural Research Institute
+Xanthe Bioinformatics Centre
+Yarrow Forest Science Institute
+Zephyr Wind Energy Research Lab
+Alcor Precision Science Academy
+Belenus Photonics Institute
+Corvus Artificial Intelligence Research Centre
+Dione Waste Science Institute
+Erebus Geothermal Research Lab
+Fomalhaut Space Materials Academy
+Galatea Aquatic Biology Institute
+Hesperus Meteorology Research Centre
+Indus Genetic Science Institute
+Jove Catalysis Research Lab
+Krios Cryobiology Academy
+Lavinia Toxicology Institute
+Morpheus Sleep Science Research Centre
+Nebula Computational Biology Institute
+Oceanus Coastal Research Lab
+Pegasus Aeronautics Institute
+Quercus Bioresource Centre
+Raven Digital Science Institute
+Sapphire Applied Research Academy
+Taurus Geomechanics Lab
+Ursa Bioengineering Institute
+Vulcan Thermal Science Centre
+Wisp Climate Modelling Institute
+Xenon Spectroscopy Lab
+Yew Conservation Academy
+Zircon Advanced Analysis Institute
+Acantha Life Science Centre
+Aegis Safety Research Institute
+Alba Hydrology Lab
+Amara Sustainable Tech Academy
+Andromeda Biophotonics Institute
+Anvil Engineering Research Centre
+Apollo Nutrition Science Institute
+Arcadia Environmental Academy
+Arcturus Data Science Lab
+Ariel Marine Biotechnology Institute
+Arken Materials Research Centre
+Artemis Wildlife Institute
+Asgard Advanced Systems Academy
+Astra Metrology Institute
+Athena Policy Research Centre
+Atlas AgriTech Institute
+Auriga Energy Systems Lab
+Avalon Health Research Academy
+Basilisk Geochemistry Institute
+Beacon Digital Research Centre
+Boreas Polar Science Lab
+Briar Ecology Institute
+Bruno Advanced Computing Academy
+Caelestis Space Biology Institute
+Cambrian Biodiversity Centre
+Capella Sensor Research Lab
+Carmine Pharmacology Institute
+Cassini Planetary Academy
+Cedar Watershed Research Institute
+Centauri Communications Lab
+Cerberus Hazard Research Centre
+Chronos Time Domain Science Institute
+Cicada Bioacoustics Academy
+Cirrus Atmospheric Modelling Lab
+Clavis Cryptography Institute
+Clover Soil Ecology Centre
+Cnidus Medicinal Botany Institute
+Comet Propulsion Academy
+Coral Reef Science Lab
+Corona Plasma Research Institute
+Cortez Hydraulic Engineering Centre
+Crest Sustainable Architecture Academy
+Crimson Microbiology Institute
+Cronus Geochronology Lab
+Cygnus Navigation Research Centre
+Dawn Observatory Institute
+Deca Nanofabrication Academy
+Deepwell Subsurface Science Lab
+Delphi Decision Research Institute
+Deneb Signal Processing Centre
+Dewpoint Meteorological Academy
+Diana Forestry Institute
+Dusk Geomagnetism Lab
+Dynamo Energy Conversion Centre
+Eagle Quantum Computing Academy
+Echidna Parasitology Institute
+Eclipse Space Dynamics Lab
+Eden Restoration Ecology Centre
+Eidolon Simulation Research Institute
+Electra Semiconductor Academy
+Elysian Public Policy Lab
+Embla Plant Genomics Institute
+Enceladus Cryosphere Centre
+Endeavour Transport Research Academy
+Eos Biomass Institute
+Ephesus Cultural Science Lab
+Erebus Carbon Cycle Centre
+Eridanus Fluid Dynamics Academy
+Eris Risk Assessment Institute
+Europa Ice Research Lab
+Evanescent Photonics Centre
+Evergreen Silviculture Academy
+Excalibur Advanced Materials Institute
+Exodus Migration Science Lab
+Fable Behavioural Research Centre
+Falcon Aerodynamics Academy
+Fawn Wildlife Health Institute
+Felix Statistical Science Lab
+Fenrir Seismic Research Centre
+Ferret Infectious Disease Academy
+Fiber Optic Science Institute
+Finch Ecosystem Lab
+Firefly Bioluminescence Centre
+Fjord Glaciology Academy
+Flame Combustion Institute
+Fleet Marine Engineering Lab
+Flint Rock Mechanics Centre
+Fog Atmospheric Chemistry Academy
+Forge Metallurgy Institute
+Frost Permafrost Lab
+Gale Wind Dynamics Centre
+Galileo Sensing Academy
+Garnet Mineralogy Institute
+Garrick Systems Research Lab
+Gauis Hydrological Modelling Centre
+Gazelle Population Ecology Academy
+Gemini Remote Sensing Institute
+Geneva Regulatory Science Lab
+Giant Sequoia Carbon Centre
+Gilded Materials Academy
+Glimmer Spectroscopy Institute
+Goblin Subterranean Lab
+Gorgon Geohazard Research Centre
+Grace Geroscience Academy
+Granite Structural Institute
+Griffin Biomechanics Lab
+Grove Mycology Centre
+Gull Ocean Tracking Academy
+Hades Carbon Sequestration Institute
+Halo Radar Research Lab
+Hamilton Statistical Modelling Centre
+Harbor Coastal Engineering Academy
+Hawk Aerodynamic Institute
+Hazel Forest Pathology Lab
+Hecla Volcanology Centre
+Helena Cognitive Neuroscience Academy
+Helix Genomics Institute
+Hemlock Toxicology Lab
+Heron Aquatic Ecology Centre
+Hestia Building Energy Academy
+Himalaya Cryosphere Institute
+Hippocrates Clinical Research Lab
+Honeybee Pollination Centre
+Horizon Satellite Academy
+Horus Optoelectronics Institute
+Hound Environmental Forensics Lab
+Hugo Urban Science Centre
+Hummingbird Biomechanics Academy
+Hydra Water Treatment Institute
+Hyperion Photovoltaics Lab
+Ibis Wetland Research Centre
+Icarus Aero-Thermal Academy
+Ida Asteroid Science Institute
+Ignis Combustion Lab
+Illyria Heritage Science Centre
+Indigo Nanophotonics Academy
+Inferno Thermal Systems Institute
+Ingrid Climate Impacts Lab
+Ion Particle Research Centre
+Iris Crop Science Academy
+Ironwood Biostructure Institute
+Isis Medicinal Chemistry Lab
+Ithaca Social Ecology Centre
+Ivory Conservation Academy
+Jade Geophysics Institute
+Jasper Rock Physics Lab
+Javelin Impact Research Centre
+Jemison Space Medicine Academy
+Juno Environmental Modelling Institute
+Jupiter Planetary Lab
+Kai Coastal Resilience Centre
+Kale Biofabrication Academy
+Kalmia Plant Physiology Institute
+Kappa Fluid Science Lab
+Karst Hydrology Centre
+Kauri Forest Carbon Academy
+Kepler Exoplanet Institute
+Kestrel Wildlife Monitoring Lab
+Keto Metabolic Research Centre
+Kilimanjaro Alpine Science Academy
+Kinect Motion Analysis Institute
+Kirk Subsurface Modelling Lab
+Kismet Behavioural Science Centre
+Kite Wind Turbine Academy
+Kronos Dating Institute
+Lagoon Aquaculture Lab
+Lancet Immunology Centre
+Lapis Petrology Academy
+Lark Acoustic Research Institute
+Latent AI Systems Lab
+Lava Magma Science Centre
+Lavender Phytochemistry Academy
+Leaf Bioprocessing Institute
+Leopard Conservation Lab
+Leto Climate Observatory Centre
+Leviathan Deep Sea Academy
+Lexicon Linguistic Science Institute
+Libra Metrology Lab
+Lichen Biomonitoring Centre
+Lightning Plasma Academy
+Lilac Natural Products Institute
+Linden Urban Ecology Lab
+Linea Geospatial Centre
+Lion Ecological Modelling Academy
+Lira Medical Imaging Institute
+Lithos Rock Chemistry Lab
+Little Dipper Space Centre
+Lotus Aquatic Botany Academy
+Lumen Laser Institute
+Lupine Soil Biology Lab
+Lyra Signal Analysis Centre
+Maelstrom Turbulence Academy
+Magneto Geomagnetic Institute
+Magnolia Plant Genomics Lab
+Mako Marine Biology Centre
+Malachite Geochemistry Academy
+Manta Ocean Observation Institute
+Maple Silviculture Lab
+Mariner Planetary Exploration Centre
+Marmot Alpine Ecology Academy
+Mars Planetary Science Institute
+Mason Construction Materials Lab
+Mastodon Paleoecology Centre
+Meadow Pollinator Academy
+Medusa Fluid Instability Institute
+Mega Structural Testing Lab
+Melior Sustainable Systems Centre
+Mermaid Estuary Science Academy
+Merlin AI Research Institute
+Mesa Arid Zone Lab
+Metis Knowledge Science Centre
+Meteor Atmospheric Academy
+Mica Mineral Processing Institute
+Midas Resource Economics Lab
+Milky Way Astrophysics Centre
+Mimosa Plant Physiology Academy
+Mink Disease Ecology Institute
+Minotaur Rock Mechanics Lab
+Mira Variable Star Centre
+Mist Boundary Layer Academy
+Mizar Navigation Institute
+Moat Hydraulic Lab
+Monarch Migration Science Centre
+Monolith Deep Geology Academy
+Moon Orbital Research Institute
+Mora Risk Modelling Lab
+Moss Biocrust Centre
+Moth Sensory Science Academy
+Mount Arid Watershed Institute
+Muse Cognitive Research Lab
+Mustelid Wildlife Health Academy
+Naiad Freshwater Biology Institute
+Nano Fabrication Lab
+Narcissus Plant Physiology Centre
+Nebula Data Simulation Academy
+Nectar Pollination Institute
+Neon Spectroscopy Lab
+Nereid Tidal Science Centre
+Nero Geothermal Academy
+Nest Behavioural Research Institute
+Nether Subsurface Lab
+Nexus Systems Science Centre
+Nimbus Cloud Physics Academy
+Nio Battery Materials Institute
+Noctiluca Marine Biophysics Lab
+Nomad Migration Research Centre
+Northstar Navigation Academy
+Nova Catalysis Institute
+Nox Low Temperature Lab
+Nucleus Cell Biology Centre
+Oasis Arid Restoration Academy
+Oberon Moon Science Institute
+Oceanus Tidal Modelling Lab
+Ocelot Tropical Ecology Centre
+Octopus Cognitive Science Academy
+Odyssey Exploration Institute
+Olive Agroecology Lab
+Olympus High Altitude Centre
+Onyx Composite Materials Academy
+Opal Optics Institute
+Orca Marine Behaviour Lab
+Orchid Phytopathology Centre
+Orion Gravity Academy
+Ortho Biomechanics Institute
+Osprey Remote Sampling Lab
+Otter Aquatic Toxicology Centre
+Owl Nighttime Ecology Academy
+Pact Environmental Governance Institute
+Paeonia Natural Product Lab
+Paleo Climate Reconstruction Centre
+Pallas Ore Research Academy
+Panthera Wildlife Institute
+Papyrus Heritage Science Lab
+Paradox Complex Systems Centre
+Pegasus Propulsion Academy
+Pelican Coastal Survey Institute
+Peregrine Aerodynamics Lab
+Peridot Geology Centre
+Persephone Soil Carbon Academy
+Perseus High Energy Institute
+Petra Rock Engineering Lab
+Pharos Optical Sensing Centre
+Pheasant Wildlife Academy
+Phoenix Regenerative Medicine Institute
+Photon Light Science Lab
+Pine Forest Dynamics Centre
+Pinnacle Structural Academy
+Pioneer Space Systems Institute
+Pirate Deep Ocean Lab
+Pisces Marine Microbiology Centre
+Pit Viper Toxicology Academy
+Pixel Imaging Science Institute
+Plato Social Modelling Lab
+Pleiades Star Research Centre
+Plume Volcanic Emissions Academy
+Pluto Cryogenic Institute
+Polaris Geolocation Lab
+Poplar Biomass Centre
+Porpoise Marine Acoustics Academy
+Porthos Material Testing Institute
+Poseidon Ocean Circulation Lab
+Prairie Grassland Ecology Centre
+Prism Spectral Analysis Academy
+Proteus Water Modelling Institute
+Psyche Metal Asteroid Lab
+Puma Savanna Ecology Centre
+Pyrus Pomology Academy
+Quanta Quantum Sensing Institute
+Quartz Crystallography Lab
+Quasar High Energy Centre
+Quercus Forest Carbon Academy
+Quill Cognitive Linguistics Institute
+Quin Synthetic Biology Lab
+Raven Computational Ecology Centre
+Ray Optoelectronics Academy
+Redwood Ecosystem Institute
+Regulus Plasma Lab
+Reef Coral Science Centre
+Remora Marine Symbiosis Academy
+Rhea Hydrometeorology Institute
+Rhino Conservation Lab
+Rhododendron Plant Science Academy
+Rift Tectonic Institute
+Rime Cryosphere Lab
+Ring Magnetosphere Centre
+Riparian Watershed Academy
+Rocket Propulsion Institute
+Rosa Phytochemistry Lab
+Roswell Aerodynamic Centre
+Ruby Laser Academy
+Rune Cryptography Institute
+Sable Desert Ecology Lab
+Sagitta Aerodynamics Centre
+Sage Dryland Institute
+Salamander Amphibian Biology Academy
+Salix Riparian Lab
+Sapphire Semiconductor Centre
+Sarcophilus Disease Institute
+Saturn Planetary Academy
+Scarab Soil Microbe Lab
+Scorpion Venom Research Centre
+Seal Polar Biology Academy
+Selene Lunar Science Institute
+Sentinel Monitoring Lab
+Serpent Geophysics Centre
+Seville AgriTech Academy
+Shale Energy Institute
+Shark Marine Physiology Lab
+Sierra Mountain Ecology Centre
+Silurian Paleobiology Academy
+Silver Photonics Institute
+Sirius Nanodevice Lab
+Skylab Aerospace Centre
+Slate Rock Physics Academy
+Smilodon Paleoecology Institute
+Solis Solar Thermal Academy
+Solstice Climate Lab
+Sparrow Urban Wildlife Centre
+Spectrum Optical Science Academy
+Spire Atmospheric Institute
+Spruce Forest Pathology Lab
+Squid Neurobiology Academy
+Stalagmite Cave Research Centre
+Starling Behavioural Academy
+Stellar Astrophysics Institute
+Sterling Materials Lab
+Stork Wetland Ecology Centre
+Stratus Cloud Modelling Academy
+Sulphur Geochemistry Institute
+Sunflower Crop Science Lab
+Supernova High Energy Centre
+Swallow Migration Academy
+Sword Advanced Alloy Institute
+Sylvan Forest Ecology Lab
+Talon Impact Mechanics Centre
+Tamarind Tropical Agro Academy
+Taurus Geomechanics Institute
+Teal Aquatic Science Lab
+Tecton Plate Dynamics Centre
+Telescope Observational Academy
+Tempest Turbulence Institute
+Tern Ocean Tracking Lab
+Tethys Ocean Basin Centre
+Thalia Ecosystem Modelling Academy
+Thallus Algae Research Institute
+Theia Planetary Impact Lab
+Thermal Energy Conversion Academy
+Thorn Wild Plant Institute
+Thunder Atmospheric Electricity Lab
+Tide Coastal Dynamics Centre
+Tiger Biodiversity Academy
+Titan Subsurface Lab
+Topaz Mineral Processing Institute
+Torch Combustion Academy
+Tornado Storm Research Institute
+Tortoise Dryland Biology Lab
+Tower Structural Dynamics Centre
+Tracer Isotope Science Academy
+Trident Marine Engineering Institute
+Triton Ice Science Lab
+Tropic Climate Centre
+Trout Freshwater Ecology Academy
+Tundra Permafrost Institute
+Turbo Fluid Mechanics Lab
+Turtle Marine Conservation Academy
+Ultramarine Nanomaterial Institute
+Ulysses Solar Wind Centre
+Umbriel Ice Moon Academy
+Unicorn Synthetic Biology Lab
+Ursa Boreal Ecology Institute
+Vale Soil Restoration Centre
+Valve Fluid Control Academy
+Vampire Bat Disease Institute
+Vanguard Space Systems Lab
+Vapor Aerosol Science Academy
+Vela Fusion Centre
+Vendetta Hazard Modelling Institute
+Venus Planetary Atmosphere Lab
+Verde Vegetation Mapping Academy
+Vesta Asteroid Institute
+Vetiver Soil Stabilisation Lab
+Vibrato Acoustic Research Academy
+Viking Polar Exploration Centre
+Vine Agroecology Institute
+Viper Pharmacology Lab
+Vireo Bird Behaviour Centre
+Virgo Cosmology Academy
+Vortex Flow Dynamics Institute
+Vulcan High Temperature Materials Lab
+Wanderer Migration Science Academy
+Warp Plasma Institute
+Wasp Insect Ecology Centre
+Waterlily Aquatic Botany Academy
+Wave Ocean Energy Lab
+Weasel Parasitology Institute
+Well Subsurface Hydrology Centre
+Wetland Biogeochemistry Academy
+Whale Marine Bioacoustics Institute
+Wheat Crop Genomics Lab
+Whisper Acoustic Sensing Centre
+Wildfire Fire Ecology Academy
+Willow Phytoremediation Institute
+Windlass Structural Testing Lab
+Wisp Aerosol Modelling Centre
+Wolf Population Ecology Academy
+Woodpecker Forest Health Lab
+Woolly Paleoclimate Institute
+Xenon Plasma Spectroscopy Centre
+Xerophyte Arid Plant Academy
+Xylos Wood Science Institute
+Yarrow Medicinal Botany Lab
+Yew Natural Toxin Academy
+Yonah Mountain Hydrology Institute
+Zebra Savanna Ecology Centre
+Zephyr Wind Dynamics Lab
+Zircon Geochronology Academy
+Zodia Planetary Observation Institute
+Zora Photovoltaic Lab
+Zygote Developmental Biology Centre
