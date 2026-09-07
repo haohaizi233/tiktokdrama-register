@@ -5,6 +5,7 @@
 - certify_page(): 纯表单操作(导航+填表+上传+提交), 不管理公司用量
 - Certifier: 批量为已注册账号做认证(独立浏览器+会话恢复/过期重登)
 - 公司资料来自 materials.py, 一司一号, usage.json 跟踪绑定
+- 机构名称来自 institutions.py 机构名库队列(一名一用, 不再使用企业名)
 - 认证结果写回号池: cert_status / cert_company / cert_at / cert_error
 
 表单结构(2026-09-06 实测 /cooperation/enterprise/create, Semi Design控件):
@@ -27,6 +28,7 @@ from threading import Event
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
+import institutions
 import materials
 import pool
 import registrar
@@ -492,8 +494,12 @@ def click_text(page, text: str, timeout_s: int = 10) -> None:
 
 
 def certify_page(page, profile: dict, *, log=None, stop_event=None,
-                 state: dict | None = None, shoot=None) -> None:
-    """在已登录page上完成认证表单填写+提交。不管理公司用量(调用方负责)。
+                 state: dict | None = None, shoot=None,
+                 institution: str = "") -> None:
+    """在已登录page上完成认证表单填写+提交。不管理公司/机构名用量(调用方负责)。
+
+    institution: 机构名称字段值, 必须来自机构名库(institutions.py 队列分配),
+    不再使用企业名(2026-09-07用户要求: 一名一用)。
 
     填写策略(2026-09-07上传先行): ①四组文件先上传并排空OCR——空字段被静默
     回填, 不会触发"识别与填写不一致"冲突弹窗(企业证明→证件正反面→地址证明
@@ -505,6 +511,8 @@ def certify_page(page, profile: dict, *, log=None, stop_event=None,
     """
     log = log or _default_log
     name = profile["name"]
+    if not institution:
+        raise CertError("机构名为空: 认证表单机构名称必须来自机构名库(GUI②区导入)")
 
     # 会话恢复/注册结束的page已停在已登录/home时直接复用(免重复goto+
     # 全文稳定等待); 会话失效时/home渲染公开落地页且URL不变(2026-09-07实测)
@@ -547,7 +555,7 @@ def certify_page(page, profile: dict, *, log=None, stop_event=None,
     _check_stop(stop_event)
 
     # --- 识别不覆盖的控件(OCR只回填文本字段): 机构名/国家/长期有效/单选 ---
-    form.fill_text("institutionName", name, "机构名称")
+    form.fill_text("institutionName", institution, "机构名称")
     form.pick_country()
     if form._read_value(form._input("enterpriseMaterialInfo.expirationDate")):
         log("  营业执照有效期已由识别填写, 不勾选长期有效", "dim")
@@ -633,28 +641,37 @@ def certify_page(page, profile: dict, *, log=None, stop_event=None,
 
 
 def certify_account(page, email: str, *, log=None, stop_event=None, shoot=None) -> str:
-    """在已登录page上为email绑定一家可用公司并完成认证提交。
+    """在已登录page上为email绑定一家可用公司+分配一个机构名并完成认证提交。
 
-    自动维护公司用量(usage.json)和号池认证状态(cert_status等)。
+    自动维护公司用量(usage.json)、机构名用量(institutions.json)和号池认证状态。
+    机构名从机构名库队列队首分配(一名一用): 未提交失败释放回队首复用,
+    提交成功终态绑定; 已点提交未确认(failed)保持绑定防一名两用。
     返回公司名; 失败抛CertError/AlreadyCertified。
     """
     log = log or _default_log
     profile = materials.pick_company()
     if not profile:
         raise CertError("无可用公司资料(全部已绑定或资料不全, 见 资料/usage.json 与 overrides.json)")
+    inst = institutions.allocate(email)
+    if not inst:
+        raise CertError("机构名库无可用机构名(请先在GUI②区导入; 每个机构名仅可使用一次)")
+    inst_name = inst["name"]
     company = profile["name"]
     materials.mark_usage(company, email, "assigned")
     log(f"  绑定公司: {company}")
+    log(f"  分配机构名: {inst_name}")
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     state: dict = {}
     try:
         certify_page(page, profile, log=log, stop_event=stop_event,
-                     state=state, shoot=shoot)
+                     state=state, shoot=shoot, institution=inst_name)
     except AlreadyCertified:
         # 账号已有认证记录: 此前"结果未确认"的提交实际已生效, 修正记账
         materials.release_usage(company)
+        institutions.release(inst_name)
         acc = next((a for a in pool.all_accounts() if a["email"] == email), {})
         prev = acc.get("cert_company")
+        prev_inst = acc.get("institution")
         note = "检测到已有认证记录, 此前提交实际已生效"
         if prev:
             usage = materials.load_usage()
@@ -662,23 +679,31 @@ def certify_account(page, email: str, *, log=None, stop_event=None, shoot=None) 
             if ent and ent.get("email") == email and ent.get("status") != "submitted":
                 ent.update(status="submitted", at=now, note=note)
                 materials.save_usage(usage)
+        if prev_inst:
+            ent = institutions.find(prev_inst)
+            if ent and ent.get("email") == email and ent.get("status") != "submitted":
+                institutions.mark(prev_inst, email, "submitted", note=note)
         pool.update_account(email, cert_status="submitted", cert_company=prev,
-                            cert_at=now, cert_error=None)
-        log(f"  {note}(公司: {prev or '未能确定'})", "warn")
+                            institution=prev_inst, cert_at=now, cert_error=None)
+        log(f"  {note}(公司: {prev or '未能确定'}, 机构名: {prev_inst or '未能确定'})", "warn")
         raise
     except Exception as e:
         if state.get("submitted"):
             materials.mark_usage(company, email, "failed", note=str(e)[:200])
+            institutions.mark(inst_name, email, "failed", note=str(e)[:200])
             pool.update_account(email, cert_status="failed", cert_company=company,
+                                institution=inst_name,
                                 cert_at=now, cert_error=str(e)[:300])
-            log(f"  已点击提交但结果未确认, 公司保持绑定: {company}", "warn")
+            log(f"  已点击提交但结果未确认, 公司/机构名保持绑定: {company} / {inst_name}", "warn")
         else:
             materials.release_usage(company)
-            log(f"  未提交, 公司已释放可复用: {company}", "dim")
+            institutions.release(inst_name)
+            log(f"  未提交, 公司/机构名已释放可复用: {company} / {inst_name}", "dim")
         raise
     materials.mark_usage(company, email, "submitted")
+    institutions.mark(inst_name, email, "submitted")
     pool.update_account(email, cert_status="submitted", cert_company=company,
-                        cert_at=now, cert_error=None)
+                        institution=inst_name, cert_at=now, cert_error=None)
     return company
 
 

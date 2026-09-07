@@ -8,6 +8,7 @@ auth/
 资料不全/
 logs/
 gui.log
+institutions.json
 
 # ===== 日志 =====
 *.log

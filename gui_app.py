@@ -14,6 +14,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 import certifier
+import institutions
 import materials
 import password_setter
 import pool
@@ -57,7 +58,7 @@ class App(tk.Tk):
         self.refresh_pool()
         self.after(150, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self._append_log("就绪。流程: ①导入账号 → ②确认号池 → ③开始注册(可勾选自动企业认证)", "dim")
+        self._append_log("就绪。流程: ①导入账号 → ②导入机构名 → ③确认号池 → ④开始注册(可勾选自动企业认证/设置密码)", "dim")
 
     # ---------- 界面 ----------
     def _build_style(self):
@@ -83,8 +84,24 @@ class App(tk.Tk):
         self.txt_paste = tk.Text(f1, height=4, wrap="none", font=("Consolas", 9))
         self.txt_paste.pack(fill="x", padx=10, pady=(0, 8))
 
-        # ② 号池区
-        f2 = ttk.LabelFrame(self, text=" ② 号池(pool_data/ 文件夹内全部json自动合并) ")
+        # ② 导入机构名区
+        f2 = ttk.LabelFrame(self, text=" ② 导入机构名(认证表单机构名称, 按队列唯一分配, 一名一用) ")
+        f2.pack(fill="x", padx=12, pady=4)
+        bar2 = ttk.Frame(f2)
+        bar2.pack(fill="x", padx=10, pady=(6, 4))
+        ttk.Button(bar2, text="选择 txt 文件导入…",
+                   command=self.import_inst_file).pack(side="left")
+        ttk.Button(bar2, text="导入下方粘贴内容",
+                   command=self.import_inst_paste).pack(side="left", padx=8)
+        self.lbl_inst_stat = ttk.Label(
+            bar2, text="格式: 每行一条机构名(可带序号)", foreground="#777777")
+        self.lbl_inst_stat.pack(side="left", padx=6)
+        self.txt_inst_paste = tk.Text(f2, height=3, wrap="none",
+                                      font=("Consolas", 9))
+        self.txt_inst_paste.pack(fill="x", padx=10, pady=(0, 8))
+
+        # ③ 号池区
+        f2 = ttk.LabelFrame(self, text=" ③ 号池(pool_data/ 文件夹内全部json自动合并) ")
         f2.pack(fill="both", padx=12, pady=4)
         bar2 = ttk.Frame(f2)
         bar2.pack(fill="x", padx=10, pady=(6, 2))
@@ -103,22 +120,24 @@ class App(tk.Tk):
         self.btn_archive.pack(side="right", padx=6)
         wrap = ttk.Frame(f2)
         wrap.pack(fill="both", expand=True, padx=10, pady=(0, 8))
-        cols = ("idx", "email", "status", "cert", "pwd", "time", "err")
-        self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=8)
+        cols = ("idx", "email", "status", "cert", "inst", "pwd", "time", "err")
+        self.tree = ttk.Treeview(wrap, columns=cols, show="headings", height=7)
         self.tree.heading("idx", text="#")
         self.tree.heading("email", text="邮箱")
         self.tree.heading("status", text="状态")
         self.tree.heading("cert", text="企业认证")
+        self.tree.heading("inst", text="机构名")
         self.tree.heading("pwd", text="密码")
         self.tree.heading("time", text="注册时间")
         self.tree.heading("err", text="备注/错误")
         self.tree.column("idx", width=44, anchor="e", stretch=False)
-        self.tree.column("email", width=250)
-        self.tree.column("status", width=70, anchor="center", stretch=False)
+        self.tree.column("email", width=230)
+        self.tree.column("status", width=66, anchor="center", stretch=False)
         self.tree.column("cert", width=76, anchor="center", stretch=False)
-        self.tree.column("pwd", width=80, anchor="center", stretch=False)
-        self.tree.column("time", width=130, anchor="center", stretch=False)
-        self.tree.column("err", width=280)
+        self.tree.column("inst", width=150)
+        self.tree.column("pwd", width=76, anchor="center", stretch=False)
+        self.tree.column("time", width=128, anchor="center", stretch=False)
+        self.tree.column("err", width=220)
         ysb = ttk.Scrollbar(wrap, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=ysb.set)
         self.tree.pack(side="left", fill="both", expand=True)
@@ -127,8 +146,8 @@ class App(tk.Tk):
         self.tree.tag_configure("failed", foreground="#c62828")
         self.tree.tag_configure("unused", foreground="#555555")
 
-        # ③ 注册+认证+密码区
-        f3 = ttk.LabelFrame(self, text=" ③ 自动注册 + 企业认证 + 设置密码 ")
+        # ④ 注册+认证+密码区
+        f3 = ttk.LabelFrame(self, text=" ④ 自动注册 + 企业认证 + 设置密码 ")
         f3.pack(fill="both", expand=True, padx=12, pady=(4, 10))
         bar3 = ttk.Frame(f3)
         bar3.pack(fill="x", padx=10, pady=(8, 6))
@@ -200,6 +219,38 @@ class App(tk.Tk):
         if new == 0 and dup > 0:
             messagebox.showinfo("导入完成", "这些邮箱号池里已存在, 全部跳过。", parent=self)
 
+    # ---------- 机构名导入 ----------
+    def import_inst_file(self):
+        path = filedialog.askopenfilename(
+            title="选择机构名txt文件", parent=self,
+            filetypes=[("文本文件", "*.txt"), ("所有文件", "*.*")])
+        if not path:
+            return
+        self._do_import_inst(read_text_smart(path), Path(path).name)
+
+    def import_inst_paste(self):
+        text = self.txt_inst_paste.get("1.0", "end").strip()
+        if not text:
+            messagebox.showinfo("提示", "粘贴框为空, 请先粘贴机构名文本。", parent=self)
+            return
+        self._do_import_inst(text, "粘贴内容")
+
+    def _do_import_inst(self, text: str, source: str):
+        try:
+            new, dup = institutions.import_text(text, source)
+        except Exception as e:
+            messagebox.showerror("导入失败", str(e), parent=self)
+            return
+        parts = [f"新增 {new}"]
+        if dup:
+            parts.append(f"重复跳过 {dup}")
+        self.lbl_inst_stat.config(text="  |  ".join(parts))
+        self._append_log(f"[机构名导入:{source}] " + "; ".join(parts),
+                         "ok" if new else "warn")
+        self.refresh_pool()
+        if new == 0 and dup > 0:
+            messagebox.showinfo("导入完成", "这些机构名库中已存在, 全部跳过。", parent=self)
+
     # ---------- 号池 ----------
     def refresh_pool(self):
         accounts = pool.all_accounts()
@@ -216,7 +267,8 @@ class App(tk.Tk):
                 note = f"[{a['cert_company']}] {note}".strip()
             self.tree.insert("", "end", tags=(st,), values=(
                 a.get("index", ""), a["email"], STATUS_CN.get(st, st),
-                CERT_CN.get(cert, "—"), PWD_CN.get(pwd, "—"),
+                CERT_CN.get(cert, "—"), a.get("institution") or "—",
+                PWD_CN.get(pwd, "—"),
                 a.get("registered_at") or "", note[:80]))
         self.lbl_pool.config(
             text=f"总数 {len(accounts)}    可用 {stats['unused']}    "
@@ -229,6 +281,12 @@ class App(tk.Tk):
             self.lbl_mat.config(text=tip)
         except Exception:
             self.lbl_mat.config(text="公司资料: 不可用(需 资料/ 文件夹 + openpyxl)")
+        try:
+            unused_i, used_i = institutions.summary()
+            self.lbl_inst_stat.config(
+                text=f"机构名库: 总数 {unused_i + used_i}    可用 {unused_i}    已用 {used_i}")
+        except Exception:
+            self.lbl_inst_stat.config(text="机构名库: 不可用")
 
     def export_excel(self):
         """导出已注册账号清单: 邮箱/密码/企业认证公司等"""
