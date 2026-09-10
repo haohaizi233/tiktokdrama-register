@@ -9,6 +9,14 @@ auth/
 logs/
 gui.log
 institutions.json
+institutions.json.bak*
+hubstudio_state.json
+
+# ===== 本地备份/临时 =====
+*.zip
+*.pdf
+_ocr_tmp/
+_备份/
 
 # ===== 日志 =====
 *.log
