@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""图形界面: ①导入账号(txt/粘贴) → ②号池管理(多json自动合并) → ③自动注册+企业认证
+"""图形界面: ①导入账号 → ②导入机构名 → ③号池管理 → ④自动注册+企业认证+设置密码
 
 线程模型: 注册/认证在工作线程执行, 通过 queue 把日志/进度/完成事件发回主线程渲染。
 企业认证: 注册后自动认证(同页面免重登) 或 独立批量认证已注册账号(会话恢复, 过期自动重登);
-公司资料由 materials.py 解析(资料/文件夹), 一司一号, 用量自动跟踪。
+公司资料由 materials.py 解析(资料/文件夹), 槽位制一司最多认证5个账号, 用量自动跟踪;
+机构名由 institutions.py 管理(institutions.json 队列), 一名一用, 认证时依次分配。
 """
 import queue
 import threading
@@ -31,7 +32,7 @@ LOG_TAGS = {
 }
 STATUS_CN = {"unused": "可用", "registered": "已注册", "failed": "失败"}
 CERT_CN = {"submitted": "已提交", "failed": "认证失败"}
-PWD_CN = {"success": "已设置", "already": "已设置(既有)",
+PWD_CN = {"success": "已设置", "already": "之前已设置",
           "failed": "失败", "unconfirmed": "待复核"}
 
 def read_text_smart(path) -> str:
@@ -43,15 +44,34 @@ def read_text_smart(path) -> str:
             pass
     return raw.decode("utf-8", "replace")
 
+
+def _hub_precheck(log):
+    """HubStudio预检(只查状态不耗额度)。在工作线程内调用; 返回None=通过,
+    否则返回错误文本。绝不能在主线程调(2026-09-09实测: 客户端API卡死时
+    两个HTTP请求各等30s超时, 主线程同步调用会冻结GUI整整60s且零日志)。"""
+    import hubstudio
+    log("HubStudio预检中(只查状态, 不耗额度)…", "dim")
+    try:
+        hubstudio.check_ready()
+        return None
+    except Exception as e:
+        log(f"HubStudio预检失败, 本次任务取消: {e}", "err")
+        return str(e)
+
 class App(tk.Tk):
     def __init__(self, auto_close: bool = False):
         super().__init__()
         self.title("TikTok短剧中心 自动注册+企业认证工具")
         self.geometry("1120x880")
-        self.minsize(960, 720)
+        self.minsize(1120, 720)  # ④区操作行(参数+4按钮)实测需~1086px, 再窄按钮截断
         self.q: queue.Queue = queue.Queue()
         self.worker = None
         self.stop_event = None
+        # 登录按钮专用: 线程驻留模型(Playwright对象绑定创建线程, 成功后parked等释放)
+        self._login_state = "idle"  # idle / running / parked
+        self._login_thread = None
+        self._login_release = None
+        self._login_handle = None  # 驻留中的浏览器 (playwright, browser)
         self.auto_close = auto_close
         self._build_style()
         self._build_ui()
@@ -80,7 +100,7 @@ class App(tk.Tk):
         self.lbl_import = ttk.Label(
             bar1, text="格式: 邮箱----密码----client_id----令牌(每行一条, 可带序号)",
             foreground="#777777")
-        self.lbl_import.pack(side="left", padx=6)
+        self.lbl_import.pack(side="right", padx=(6, 8))
         self.txt_paste = tk.Text(f1, height=4, wrap="none", font=("Consolas", 9))
         self.txt_paste.pack(fill="x", padx=10, pady=(0, 8))
 
@@ -95,7 +115,7 @@ class App(tk.Tk):
                    command=self.import_inst_paste).pack(side="left", padx=8)
         self.lbl_inst_stat = ttk.Label(
             bar2, text="格式: 每行一条机构名(可带序号)", foreground="#777777")
-        self.lbl_inst_stat.pack(side="left", padx=6)
+        self.lbl_inst_stat.pack(side="right", padx=(6, 8))
         self.txt_inst_paste = tk.Text(f2, height=3, wrap="none",
                                       font=("Consolas", 9))
         self.txt_inst_paste.pack(fill="x", padx=10, pady=(0, 8))
@@ -103,21 +123,34 @@ class App(tk.Tk):
         # ③ 号池区
         f2 = ttk.LabelFrame(self, text=" ③ 号池(pool_data/ 文件夹内全部json自动合并) ")
         f2.pack(fill="both", padx=12, pady=4)
+        # 统计行(上): 三个统计标签右对齐(逆序pack保阅读顺序, 右缘统一-8px)
+        stat = ttk.Frame(f2)
+        stat.pack(fill="x", padx=10, pady=(6, 0))
+        self.lbl_company = ttk.Label(stat, text="", foreground="#777777")
+        self.lbl_company.pack(side="right", padx=(0, 8))
+        self.lbl_mat = ttk.Label(stat, text="", foreground="#777777")
+        self.lbl_mat.pack(side="right", padx=14)
+        self.lbl_pool = ttk.Label(stat, text="…")
+        self.lbl_pool.pack(side="right")
+        # 按钮行(下): 右对齐
         bar2 = ttk.Frame(f2)
-        bar2.pack(fill="x", padx=10, pady=(6, 2))
-        self.lbl_pool = ttk.Label(bar2, text="…")
-        self.lbl_pool.pack(side="left")
-        self.lbl_mat = ttk.Label(bar2, text="", foreground="#777777")
-        self.lbl_mat.pack(side="left", padx=14)
+        bar2.pack(fill="x", padx=10, pady=(4, 2))
         self.btn_reset = ttk.Button(bar2, text="重置失败账号",
                                     command=self.reset_failed, width=12)
-        self.btn_reset.pack(side="right")
+        self.btn_reset.pack(side="right", padx=(0, 8))
         ttk.Button(bar2, text="刷新", command=self.refresh_pool, width=8).pack(side="right", padx=6)
         ttk.Button(bar2, text="导出Excel…", command=self.export_excel,
                    width=12).pack(side="right")
         self.btn_archive = ttk.Button(bar2, text="归档资料不全", width=12,
                                       command=self.archive_bad_materials)
         self.btn_archive.pack(side="right", padx=6)
+        self.btn_reclaim = ttk.Button(bar2, text="回收未提交占用", width=14,
+                                      command=self.reclaim_stale)
+        self.btn_reclaim.pack(side="right", padx=(0, 6))
+        # 登录选中账号: 人工查看用(③区表格选中行→自动登录, 浏览器保持打开)
+        self.btn_login = ttk.Button(bar2, text="▶ 登录选中账号", width=14,
+                                    command=self.start_login_selected)
+        self.btn_login.pack(side="right", padx=(0, 6))
         wrap = ttk.Frame(f2)
         wrap.pack(fill="both", expand=True, padx=10, pady=(0, 8))
         cols = ("idx", "email", "status", "cert", "inst", "pwd", "time", "err")
@@ -149,29 +182,46 @@ class App(tk.Tk):
         # ④ 注册+认证+密码区
         f3 = ttk.LabelFrame(self, text=" ④ 自动注册 + 企业认证 + 设置密码 ")
         f3.pack(fill="both", expand=True, padx=12, pady=(4, 10))
+        # 选项行(上): 5个复选框右端对齐(逆序pack, 右缘与下行「■ 停止」按钮齐平)
         bar3 = ttk.Frame(f3)
-        bar3.pack(fill="x", padx=10, pady=(8, 6))
-        ttk.Label(bar3, text="本次消耗:").pack(side="left")
-        self.cmb_count = ttk.Combobox(
-            bar3, values=("1", "5", "10", "20", "max"), width=5, state="readonly")
-        self.cmb_count.current(0)
-        self.cmb_count.pack(side="left", padx=(4, 14))
-        self.chk_headless = tk.BooleanVar(value=False)
-        ttk.Checkbutton(bar3, text="无头模式(后台运行不弹浏览器)",
-                        variable=self.chk_headless).pack(side="left")
-        self.chk_autocert = tk.BooleanVar(value=True)
-        ttk.Checkbutton(bar3, text="注册后自动企业认证",
-                        variable=self.chk_autocert).pack(side="left", padx=(14, 0))
+        bar3.pack(fill="x", padx=10, pady=(8, 2))
         self.chk_autopwd = tk.BooleanVar(value=True)
         ttk.Checkbutton(bar3, text="注册后自动设置密码",
-                        variable=self.chk_autopwd).pack(side="left", padx=(14, 0))
-        self.btn_stop = ttk.Button(bar3, text="■ 停止", command=self.stop_register, state="disabled")
+                        variable=self.chk_autopwd).pack(side="right", padx=(0, 8))
+        self.chk_autocert = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar3, text="注册后自动企业认证",
+                        variable=self.chk_autocert).pack(side="right", padx=(0, 14))
+        # 每账号新IP: HubStudio代理对每个新context自动分配独立出口IP(零额度), 勾选后实测并记录
+        self.chk_rot = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar3, text="每账号新IP",
+                        variable=self.chk_rot).pack(side="right", padx=(0, 14))
+        self.chk_hub = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar3, text="HubStudio指纹浏览器",
+                        variable=self.chk_hub).pack(side="right", padx=(0, 8))
+        self.chk_headless = tk.BooleanVar(value=False)
+        ttk.Checkbutton(bar3, text="无头模式(后台运行不弹浏览器)",
+                        variable=self.chk_headless).pack(side="right", padx=(0, 14))
+        # 操作行(下): 消耗数 + 按钮组
+        bar4 = ttk.Frame(f3)
+        bar4.pack(fill="x", padx=10, pady=(2, 6))
+        ttk.Label(bar4, text="本次消耗:").pack(side="left")
+        self.cmb_count = ttk.Combobox(
+            bar4, values=("1", "5", "10", "20", "max"), width=5, state="readonly")
+        self.cmb_count.current(0)
+        self.cmb_count.pack(side="left", padx=(4, 14))
+        # 每企业可认证账号数: 平台规则固定5, 只展示不可改(2026-09-08)
+        ttk.Label(bar4, text="每企业认证账号数:").pack(side="left")
+        self.spn_slots = ttk.Spinbox(
+            bar4, from_=1, to=9, width=3, state="disabled")
+        self.spn_slots.set(materials.COMPANY_SLOTS)
+        self.spn_slots.pack(side="left", padx=(4, 14))
+        self.btn_stop = ttk.Button(bar4, text="■ 停止", command=self.stop_register, state="disabled")
         self.btn_stop.pack(side="right", padx=8)
-        self.btn_start = ttk.Button(bar3, text="▶ 开始注册", command=self.start_register)
+        self.btn_start = ttk.Button(bar4, text="▶ 开始注册", command=self.start_register)
         self.btn_start.pack(side="right")
-        self.btn_cert = ttk.Button(bar3, text="▶ 认证已注册账号", command=self.start_certify)
+        self.btn_cert = ttk.Button(bar4, text="▶ 认证已注册账号", command=self.start_certify)
         self.btn_cert.pack(side="right", padx=(0, 8))
-        self.btn_pwd = ttk.Button(bar3, text="▶ 设置密码", command=self.start_pwd)
+        self.btn_pwd = ttk.Button(bar4, text="▶ 设置密码", command=self.start_pwd)
         self.btn_pwd.pack(side="right", padx=(0, 8))
         self.progress = ttk.Progressbar(f3, maximum=100)
         self.progress.pack(fill="x", padx=10, pady=(0, 4))
@@ -237,18 +287,20 @@ class App(tk.Tk):
 
     def _do_import_inst(self, text: str, source: str):
         try:
-            new, dup = institutions.import_text(text, source)
+            new, dup, over = institutions.import_text(text, source)
         except Exception as e:
             messagebox.showerror("导入失败", str(e), parent=self)
             return
         parts = [f"新增 {new}"]
         if dup:
             parts.append(f"重复跳过 {dup}")
+        if over:
+            parts.append(f"超长跳过 {over}(>30字符, 表单输入框上限)")
         self.lbl_inst_stat.config(text="  |  ".join(parts))
         self._append_log(f"[机构名导入:{source}] " + "; ".join(parts),
                          "ok" if new else "warn")
         self.refresh_pool()
-        if new == 0 and dup > 0:
+        if new == 0 and dup > 0 and over == 0:
             messagebox.showinfo("导入完成", "这些机构名库中已存在, 全部跳过。", parent=self)
 
     # ---------- 号池 ----------
@@ -274,17 +326,22 @@ class App(tk.Tk):
             text=f"总数 {len(accounts)}    可用 {stats['unused']}    "
                  f"已注册 {stats['registered']}    失败 {stats['failed']}")
         try:
-            ok_c, used_c, problems = materials.summary()
-            tip = f"公司资料: 可用 {ok_c} / 已绑定 {used_c}"
-            if problems:
-                tip += f" / 资料不全 {len(problems)}"
-            self.lbl_mat.config(text=tip)
+            ok_c, used_c, _ = materials.summary()
+            self.lbl_mat.config(text=f"公司槽位: 可用 {ok_c} / 已用 {used_c}")
+            total, used_co, free_co, bad_co = materials.company_counts()
+            self.lbl_company.config(
+                text=f"公司数: 总 {total} 家 / 已用 {used_co} / 空闲 {free_co} / 不全 {bad_co}")
         except Exception:
-            self.lbl_mat.config(text="公司资料: 不可用(需 资料/ 文件夹 + openpyxl)")
+            self.lbl_mat.config(text="")
+            self.lbl_company.config(text="")
         try:
             unused_i, used_i = institutions.summary()
-            self.lbl_inst_stat.config(
-                text=f"机构名库: 总数 {unused_i + used_i}    可用 {unused_i}    已用 {used_i}")
+            over_i = institutions.count_overlong()
+            stat = (f"机构名库: 总数 {unused_i + used_i}    可用 {unused_i}    "
+                    f"已用 {used_i}")
+            if over_i:
+                stat += f"    超长不可用 {over_i}"
+            self.lbl_inst_stat.config(text=stat)
         except Exception:
             self.lbl_inst_stat.config(text="机构名库: 不可用")
 
@@ -312,16 +369,17 @@ class App(tk.Tk):
         wb = openpyxl.Workbook()
         ws = wb.active
         ws.title = "账号"
-        ws.append(["邮箱", "密码", "密码状态", "企业认证公司", "认证状态", "注册时间"])
+        ws.append(["邮箱", "密码", "密码状态", "企业认证公司", "机构名", "认证状态", "注册时间"])
         for a in rows:
             ws.append([
                 a["email"], a.get("password", ""),
                 PWD_CN.get(a.get("pwd_status"), "未设置"),
                 a.get("cert_company") or "",
+                a.get("institution") or "",
                 CERT_CN.get(a.get("cert_status"), "—"),
                 a.get("registered_at") or "",
             ])
-        for col, w in zip("ABCDEF", (34, 16, 12, 30, 10, 20)):
+        for col, w in zip("ABCDEFG", (34, 16, 12, 30, 26, 10, 20)):
             ws.column_dimensions[col].width = w
         try:
             wb.save(path)
@@ -339,6 +397,31 @@ class App(tk.Tk):
         n = pool.reset_failed()
         self.refresh_pool()
         self._append_log(f"已重置 {n} 个失败账号为可用状态。", "ok")
+
+    def reclaim_stale(self):
+        if self.worker and self.worker.is_alive():
+            return
+        n_slot = materials.count_assigned()
+        n_inst = institutions.count_assigned()
+        if n_slot == 0 and n_inst == 0:
+            messagebox.showinfo(
+                "提示",
+                "当前没有「分配中、从未提交」的占用。\n\n"
+                "认证失败(已点提交、结果未确认)的占用会在重试时续上同一对公司和机构名, 不会回收。",
+                parent=self)
+            return
+        if not messagebox.askyesno(
+                "确认回收",
+                f"将释放分配中但从未提交的占用:\n\n"
+                f"· 公司槽 {n_slot} 个\n· 机构名 {n_inst} 个\n\n"
+                "不影响已提交, 也不影响认证失败待核实的占用。确定?",
+                parent=self):
+            return
+        stats = pool.reclaim_stale_assignments()
+        self._append_log(
+            f"已回收未提交占用: 公司槽 {len(stats['slots'])} 个, "
+            f"机构名 {len(stats['institutions'])} 个", "ok")
+        self.refresh_pool()
 
     # ---------- 归档资料不全 ----------
     def archive_bad_materials(self):
@@ -411,22 +494,32 @@ class App(tk.Tk):
             return
         sel = self.cmb_count.get()
         targets = unused if sel == "max" else unused[: int(sel)]
-        preview = "\n".join(a["email"] for a in targets[:5])
-        if len(targets) > 5:
-            preview += f"\n… 等共 {len(targets)} 个"
         autocert = self.chk_autocert.get()
         if autocert:
             try:
-                ok_c, used_c, _ = materials.summary()
-                if ok_c == 0:
-                    self._append_log("没有资料完整的可用公司, 本次注册将跳过自动认证", "warn")
-                    autocert = False
+                ok_c, _, _ = materials.summary()
             except Exception as e:
                 self._append_log(f"公司资料解析失败({e}), 本次注册将跳过自动认证", "warn")
                 autocert = False
+            else:
+                unused_i, _ = institutions.summary()
+                cap = min(ok_c, unused_i)
+                if cap <= 0:
+                    self._append_log(
+                        "没有可用公司槽位或机构名, 本次注册将跳过自动认证", "warn")
+                    autocert = False
+                elif cap < len(targets):
+                    self._append_log(
+                        f"可用公司槽位/机构名仅 {cap} 个, 本次只注册前 {cap} 个账号"
+                        " (避免注册后无法认证)", "warn")
+                    targets = targets[:cap]
+        preview = "\n".join(a["email"] for a in targets[:5])
+        if len(targets) > 5:
+            preview += f"\n… 等共 {len(targets)} 个"
         autopwd = self.chk_autopwd.get()
-        cert_tip = ("\n\n已勾选[注册后自动企业认证]: 每个账号注册成功后立即绑定一家公司提交认证"
-                    "\n(公司资料一司一号, 用量自动跟踪)。" if autocert else "")
+        cert_tip = ("\n\n已勾选[注册后自动企业认证]: 每个账号注册成功后立即绑定公司槽位提交认证"
+                    f"\n(每企业最多认证{materials.COMPANY_SLOTS}个账号, 机构名一名一用, 用量自动跟踪)。"
+                    if autocert else "")
         pwd_tip = "\n\n已勾选[注册后自动设置密码]: 每个账号注册成功后自动设置账户密码(复用邮箱密码)。" if autopwd else ""
         if confirm and not messagebox.askyesno(
                 "确认开始",
@@ -438,15 +531,24 @@ class App(tk.Tk):
         self._set_running(True)
         self.progress.config(maximum=len(targets), value=0)
         headless = self.chk_headless.get()  # tkinter变量只能主线程读, 提前取出
+        use_hub = self.chk_hub.get()
+        rot_ip = use_hub and self.chk_rot.get()
         self._append_log(f"开始注册 {len(targets)} 个账号"
-                         f"(无头模式={'开' if headless else '关'}, "
+                         f"(HubStudio={'开' if use_hub else '关'}, "
+                         f"每账号新IP={'开' if rot_ip else '关'}, "
+                         f"无头模式={'开' if headless else '关'}, "
                          f"自动认证={'开' if autocert else '关'}, "
                          f"自动密码={'开' if autopwd else '关'})", "warn")
+        if rot_ip:
+            self._append_log("每账号新IP: 代理对每个窗口自动分配独立出口IP(零额度), "
+                             "本次实测并记录每账号IP", "dim")
         self.worker = threading.Thread(
-            target=self._work, args=(targets, headless, autocert, autopwd), daemon=True)
+            target=self._work, args=(targets, headless, use_hub, rot_ip, autocert, autopwd),
+            daemon=True)
         self.worker.start()
 
-    def _work(self, targets, headless: bool, autocert: bool, autopwd: bool):
+    def _work(self, targets, headless: bool, use_hub: bool, rot_ip: bool,
+              autocert: bool, autopwd: bool):
         total = len(targets)
 
         def log(msg, level="info"):
@@ -462,10 +564,16 @@ class App(tk.Tk):
                 shoot=shoot, do_cert=autocert, do_pwd=autopwd)
             self.q.put(("pool",))
 
+        if use_hub:
+            err = _hub_precheck(log)
+            if err:
+                self.q.put(("hub_fail", err))
+                return
         try:
             reg = Registrar(targets, headless=headless,
                             log=log, progress=prog, stop_event=self.stop_event,
-                            after_register=after_register)
+                            after_register=after_register,
+                            use_hubstudio=use_hub, rotate_ip=rot_ip)
             ok, fail = reg.run()
             self.q.put(("done", ok, fail, self.stop_event.is_set()))
         except Exception as e:
@@ -491,37 +599,55 @@ class App(tk.Tk):
                 f"企业资料解析失败: {e}\n\n请确认 资料/ 文件夹(xlsx汇总表+公司文件夹)存在, "
                 "且已安装 openpyxl。", parent=self)
             return
-        if not ok_c:
-            msg = "没有资料完整的可用公司(全部已绑定或资料不全)。"
-            if problems:
+        unused_i, used_i = institutions.summary()
+        runnable, skipped = pool.select_certifiable(targets)
+        for email, reason in skipped[:8]:
+            self._append_log(f"  跳过 {email}: {reason}", "dim")
+        if len(skipped) > 8:
+            self._append_log(f"  … 另有 {len(skipped) - 8} 个跳过", "dim")
+        if not runnable:
+            msg = "没有可认证账号(无空槽、无可用机构名, 且没有可续上的失败绑定)。"
+            if skipped:
+                msg += "\n\n" + "\n".join(f"· {e}: {r}" for e, r in skipped[:6])
+            elif problems:
                 msg += "\n\n资料不全的公司:\n" + "\n".join(problems[:6])
             messagebox.showwarning("提示", msg, parent=self)
             return
-        if ok_c < len(targets):
-            self._append_log(f"可用公司 {ok_c} 家 < 待认证账号 {len(targets)} 个, "
-                             f"本次只处理前 {ok_c} 个账号", "warn")
-            targets = targets[:ok_c]
+        if skipped:
+            self._append_log(
+                f"库存/续用限制: {len(targets)} 个待认证 → 本次处理 {len(runnable)} 个",
+                "warn")
+        targets = runnable
         preview = "\n".join(a["email"] for a in targets[:5])
         if len(targets) > 5:
             preview += f"\n… 等共 {len(targets)} 个"
         if confirm and not messagebox.askyesno(
                 "确认开始",
                 f"将为以下 {len(targets)} 个已注册账号逐个提交企业认证:\n\n{preview}\n\n"
-                f"公司资料: 可用 {ok_c} 家 / 已绑定 {used_c} 家\n"
-                "每个账号自动绑定一家公司(按资料表顺序), 提交后该公司不再复用;\n"
-                "登录会话过期时自动用邮箱验证码重登。\n确定开始?", parent=self):
+                f"公司槽位: 可用 {ok_c} 个 / 已用 {used_c} 个"
+                f" (每企业{materials.COMPANY_SLOTS}号, 先填满一家再换下一家)\n"
+                f"机构名库: 可用 {unused_i} 个 / 已用 {used_i} 个\n"
+                "已有认证失败绑定的账号会续上原公司/机构名, 不新占库存;\n"
+                "新号各占一个公司槽位 + 一个机构名。登录过期自动验证码重登。\n确定开始?", parent=self):
             return
         self.stop_event = threading.Event()
         self._set_running(True)
         self.progress.config(maximum=len(targets), value=0)
         headless = self.chk_headless.get()
+        use_hub = self.chk_hub.get()
+        rot_ip = use_hub and self.chk_rot.get()
         self._append_log(f"开始企业认证 {len(targets)} 个账号"
-                         f"(无头模式={'开' if headless else '关'})", "warn")
+                         f"(HubStudio={'开' if use_hub else '关'}, "
+                         f"每账号新IP={'开' if rot_ip else '关'}, "
+                         f"无头模式={'开' if headless else '关'})", "warn")
+        if rot_ip:
+            self._append_log("每账号新IP: 代理对每个窗口自动分配独立出口IP(零额度), "
+                             "本次实测并记录每账号IP", "dim")
         self.worker = threading.Thread(
-            target=self._work_cert, args=(targets, headless), daemon=True)
+            target=self._work_cert, args=(targets, headless, use_hub, rot_ip), daemon=True)
         self.worker.start()
 
-    def _work_cert(self, targets, headless: bool):
+    def _work_cert(self, targets, headless: bool, use_hub: bool, rot_ip: bool):
         total = len(targets)
 
         def log(msg, level="info"):
@@ -530,10 +656,16 @@ class App(tk.Tk):
         def prog(done, tot):
             self.q.put(("progress", done, tot))
 
+        if use_hub:
+            err = _hub_precheck(log)
+            if err:
+                self.q.put(("hub_fail", err))
+                return
         try:
             cert = certifier.Certifier(targets, headless=headless,
                                        log=log, progress=prog,
-                                       stop_event=self.stop_event)
+                                       stop_event=self.stop_event,
+                                       use_hubstudio=use_hub, rotate_ip=rot_ip)
             ok, fail, skip = cert.run()
             self.q.put(("cert_done", ok, fail, skip, self.stop_event.is_set()))
         except Exception as e:
@@ -567,13 +699,20 @@ class App(tk.Tk):
         self._set_running(True)
         self.progress.config(maximum=len(targets), value=0)
         headless = self.chk_headless.get()
+        use_hub = self.chk_hub.get()
+        rot_ip = use_hub and self.chk_rot.get()
         self._append_log(f"开始设置密码 {len(targets)} 个账号"
-                         f"(无头模式={'开' if headless else '关'})", "warn")
+                         f"(HubStudio={'开' if use_hub else '关'}, "
+                         f"每账号新IP={'开' if rot_ip else '关'}, "
+                         f"无头模式={'开' if headless else '关'})", "warn")
+        if rot_ip:
+            self._append_log("每账号新IP: 代理对每个窗口自动分配独立出口IP(零额度), "
+                             "本次实测并记录每账号IP", "dim")
         self.worker = threading.Thread(
-            target=self._work_pwd, args=(targets, headless), daemon=True)
+            target=self._work_pwd, args=(targets, headless, use_hub, rot_ip), daemon=True)
         self.worker.start()
 
-    def _work_pwd(self, targets, headless: bool):
+    def _work_pwd(self, targets, headless: bool, use_hub: bool, rot_ip: bool):
         total = len(targets)
 
         def log(msg, level="info"):
@@ -582,15 +721,150 @@ class App(tk.Tk):
         def prog(done, tot):
             self.q.put(("progress", done, tot))
 
+        if use_hub:
+            err = _hub_precheck(log)
+            if err:
+                self.q.put(("hub_fail", err))
+                return
         try:
             setter = password_setter.PasswordSetter(
                 targets, headless=headless, log=log, progress=prog,
-                stop_event=self.stop_event)
+                stop_event=self.stop_event, use_hubstudio=use_hub,
+                rotate_ip=rot_ip)
             ok, fail, skip = setter.run()
             self.q.put(("pwd_done", ok, fail, skip, self.stop_event.is_set()))
         except Exception as e:
             log(f"引擎异常: {e}", "err")
             self.q.put(("pwd_done", 0, total, 0, True))
+
+    # ---------- 登录选中账号(人工查看用) ----------
+    def start_login_selected(self):
+        """③区选中行 → 自动登录该账号; 优先auth会话恢复, 过期自动邮箱验证码重登。
+
+        登录后浏览器保持打开供人工查看(强制有头); 登录线程驻留(Playwright对象
+        绑定创建线程, 清理必须回原线程), 下次登录其他账号或退出GUI时释放。
+        不消耗新账号(验证码重登只耗一封邮件)。
+        """
+        if self.worker and self.worker.is_alive():
+            return
+        if self._login_state == "running":
+            return
+        if self._login_state == "parked":  # 关上一个登录窗口(一次保持一个)
+            self._release_login()
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("提示", "请先在③号池表格中选中一个已注册账号。", parent=self)
+            return
+        email = str(self.tree.item(sel[0], "values")[1])
+        acc = next((a for a in pool.all_accounts() if a["email"] == email), None)
+        if not acc or acc.get("status") != "registered":
+            messagebox.showinfo(
+                "提示", f"{email} 不是已注册账号, 无法登录。\n"
+                        "(未注册邮箱走验证码登录会被自动注册, 已拦截)", parent=self)
+            return
+        use_hub = self.chk_hub.get()
+        if len(sel) > 1:
+            self._append_log(f"选中了 {len(sel)} 行, 仅登录第一个: {email}", "dim")
+        self.stop_event = threading.Event()
+        self._login_state = "running"
+        self._set_running(True)
+        self.progress.config(maximum=1, value=0)
+        self.lbl_progress.config(text=f"登录: {email}")
+        self._append_log(
+            f"开始登录 {email} (HubStudio={'开' if use_hub else '关'}, 有头窗口), "
+            "优先auth会话恢复, 过期自动邮箱验证码重登", "warn")
+        self._login_release = threading.Event()
+        self._login_thread = threading.Thread(
+            target=self._work_login, args=(email, use_hub, self._login_release),
+            daemon=True)
+        self._login_thread.start()
+
+    def _work_login(self, email: str, use_hub: bool, release: threading.Event):
+        def log(msg, level="info"):
+            self.q.put(("log", level, f"[{datetime.now():%H:%M:%S}] {msg}"))
+
+        def shoot(page, name):
+            try:
+                path = ROOT / "logs" / f"{datetime.now():%H%M%S}_login_{name}.png"
+                path.parent.mkdir(exist_ok=True)
+                page.screenshot(path=str(path))
+                log(f"  截图: {path.name}", "dim")
+            except Exception:
+                pass
+
+        from playwright.sync_api import sync_playwright
+        import hubstudio
+        pw = browser = None
+        try:
+            # HubStudio预检在工作线程内(主线程同步HTTP会冻结GUI)
+            if use_hub:
+                err = _hub_precheck(log)
+                if err:
+                    raise hubstudio.HubStudioError(err)
+            # 不用with块: 登录成功后保持浏览器打开; Playwright sync对象绑定
+            # 本线程, 线程驻留等待release, 清理(关浏览器/停driver)都在本线程做
+            pw = sync_playwright().start()
+            if use_hub:
+                browser = hubstudio.connect(pw, log=log)  # 环境已开则复用, 不耗额度
+                chain = hubstudio.WindowChain(browser, log=log)
+                page, _ = certifier.open_session(
+                    browser, email, log=log, stop_event=self.stop_event,
+                    shoot=shoot, use_hub=True, chain=chain)
+            else:
+                browser = pw.chromium.launch(
+                    headless=False,
+                    args=["--disable-blink-features=AutomationControlled"])
+                page, _ = certifier.open_session(
+                    browser, email, log=log, stop_event=self.stop_event,
+                    shoot=shoot, use_hub=False)
+            self._login_handle = (pw, browser)
+            self._login_state = "parked"
+            self.q.put(("login_done", email, True, ""))
+            release.wait()  # 驻留: 浏览器保持打开, 直到下次登录/退出GUI
+        except Exception as e:
+            self._login_state = "idle"
+            if browser is not None:  # 启动/登录失败: 原地清理, 不留半登录窗口
+                try:
+                    browser.close()
+                except Exception:
+                    pass
+            if use_hub:
+                try:
+                    hubstudio.close_env(log=log)
+                except Exception:
+                    pass
+            if pw is not None:
+                try:
+                    pw.stop()
+                except Exception:
+                    pass
+            log(f"登录失败: {e}", "err")
+            self.q.put(("login_done", email, False, str(e)[:300]))
+            return
+        # 正常释放(下次登录/退出GUI): 原线程内清理
+        if use_hub:
+            log("关闭登录窗口(HubStudio环境保留供下次复用)", "dim")
+        try:
+            browser.close()  # Hub模式只断CDP连接, 环境不关
+        except Exception:
+            pass
+        try:
+            pw.stop()
+        except Exception:
+            pass
+        self._login_handle = None
+        self._login_state = "idle"
+
+    def _release_login(self):
+        """释放驻留的登录线程: 信号→等它在本线程内完成浏览器清理"""
+        if self._login_state != "parked" or not (
+                self._login_thread and self._login_thread.is_alive()):
+            return
+        if self._login_release:
+            self._login_release.set()
+        self._login_thread.join(timeout=10)
+        self._login_thread = None
+        self._append_log("已关闭上一个登录窗口", "dim")
 
     def stop_register(self):
         if self.stop_event:
@@ -639,7 +913,7 @@ class App(tk.Tk):
                         messagebox.showinfo(
                             "已停止" if stopped else "认证完成",
                             f"提交成功: {ok} 个\n失败: {fail} 个\n跳过(已有认证): {skip} 个\n\n"
-                            "公司绑定关系见 资料/usage.json, 过程截图见 logs/。", parent=self)
+                            "公司槽位绑定见 资料/usage.json, 过程截图见 logs/。", parent=self)
                 elif kind == "pwd_done":
                     _, ok, fail, skip, stopped = msg
                     self._set_running(False)
@@ -654,6 +928,36 @@ class App(tk.Tk):
                             "已停止" if stopped else "密码设置完成",
                             f"设置成功: {ok} 个\n失败: {fail} 个\n跳过(已设置过): {skip} 个\n\n"
                             "结果已记录在号池, 可点[导出Excel…]导出邮箱+密码清单。", parent=self)
+                elif kind == "hub_fail":
+                    _, err = msg
+                    self._set_running(False)
+                    self.lbl_progress.config(text="空闲")
+                    self._append_log("===== HubStudio不可用, 任务未执行 =====", "err")
+                    if not self.auto_close:
+                        messagebox.showerror(
+                            "HubStudio不可用",
+                            f"{err}\n\n常见原因与处理:\n"
+                            "· 客户端没运行 → 打开HubStudio客户端(VIP及以上套餐)\n"
+                            "· 端口在监听但超时 → 客户端卡死/残留进程, 重启HubStudio客户端\n"
+                            "· 或取消勾选「HubStudio指纹浏览器」改用普通浏览器", parent=self)
+                elif kind == "login_done":
+                    _, email, ok, err = msg
+                    self._set_running(False)
+                    self.progress.config(value=1)
+                    self.lbl_progress.config(text="空闲")
+                    if ok:
+                        self._append_log(f"===== {email} 登录完成, 浏览器保持打开 =====", "ok")
+                        if not self.auto_close:
+                            messagebox.showinfo(
+                                "登录完成",
+                                f"{email} 已登录, 浏览器窗口保持打开, 可直接查看账号。\n\n"
+                                "(登录凭证已自动刷新到 auth/; 下次登录其他账号或退出GUI时\n"
+                                "会自动关闭这个窗口; HubStudio模式下环境保留供复用)",
+                                parent=self)
+                    else:
+                        self._append_log(f"===== {email} 登录失败: {err} =====", "err")
+                        if not self.auto_close:
+                            messagebox.showerror("登录失败", f"{email}\n\n{err}", parent=self)
         except queue.Empty:
             pass
         self.after(150, self._drain)
@@ -663,8 +967,10 @@ class App(tk.Tk):
         self.btn_start.config(state=st)
         self.btn_cert.config(state=st)
         self.btn_pwd.config(state=st)
+        self.btn_login.config(state=st)
         self.btn_reset.config(state=st)
         self.btn_archive.config(state=st)
+        self.btn_reclaim.config(state=st)
         self.cmb_count.config(state="disabled" if running else "readonly")
         self.btn_stop.config(state="normal" if running else "disabled")
 
@@ -674,6 +980,9 @@ class App(tk.Tk):
                 return
             if self.stop_event:
                 self.stop_event.set()
+        if self._login_state == "running" and self.stop_event:
+            self.stop_event.set()  # 驻留前的登录流程中止
+        self._release_login()
         self.destroy()
 
     def _append_log(self, text: str, level: str = "info"):
@@ -689,7 +998,14 @@ class App(tk.Tk):
 
 def run(smoke: bool = False, auto: int = 0) -> None:
     pool.migrate_legacy()
+    stats = pool.reclaim_stale_assignments()
     app = App(auto_close=auto > 0)
+    n_slot = len(stats["slots"])
+    n_inst = len(stats["institutions"])
+    if n_slot or n_inst:
+        app._append_log(
+            f"已回收未提交占用: 公司槽 {n_slot} 个, 机构名 {n_inst} 个"
+            " (认证失败待核实的占用会在重试时续上, 未回收)", "warn")
     if smoke:
         app.after(1200, app.destroy)
     if auto:
