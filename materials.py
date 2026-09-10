@@ -2,13 +2,16 @@
 """企业资料解析: 资料/ 文件夹 + 汇总xlsx → 公司档案, 供企业认证自动化使用
 
 数据源(同格式资料可重复使用):
-- 资料/*.xlsx        汇总表, 每行一家公司, 列序固定:
+- 资料/*.xlsx        汇总表, 每行一家公司, 固定12列布局(列序不变):
     A公司名 B注册编号 C注册州 D注册城市 E注册地址
     F代表人姓名 G出生日期 H证件号 I证件有效期
     J居住州 K居住城市 L居住地址
+  允许缺值(2026-09-08业务变更): B~E(企业注册字段)以PDF识别回填为准, 留空即可;
+  J~L(居住地址)表单无对应字段, 本就未用。必填=A公司名+F~I代表人4项
+  (证件照片识别不准, 必须表格录入)
 - 资料/{公司名}/     该公司文件: 州注册文件(AOG/注册回执/Correspondence)、CP575、证件照片
 - 资料/overrides.json 可选, 人工指定文件角色: {"公司名": {"id_front": "文件名", ...}}
-- 资料/usage.json    自动维护, 记录每家公司绑定到哪个邮箱、认证结果
+- 资料/usage.json    自动维护, 槽位制: {公司: [{email,status,at,note}...]}, 一司最多5号
 
 文件角色自动识别规则:
 - 州注册文件(企业营业证明): 文件名含 "-AOG-" > "Business Entity Filing Acknowledgment" > "Correspondence"
@@ -23,13 +26,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 MATERIALS_DIR = ROOT / "资料"
-USAGE_FILE = MATERIALS_DIR / "usage.json"
 OVERRIDES_FILE = MATERIALS_DIR / "overrides.json"
 
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
-BLOCKERS = ("biz_proof", "cp575", "id_front", "id_back",
-            "reg_no", "reg_state", "reg_city", "reg_addr",
-            "rep_name", "rep_birth", "id_no", "id_exp")
 
 COLUMNS = ("company", "reg_no", "reg_state", "reg_city", "reg_addr",
            "rep_name", "rep_birth", "id_no", "id_exp",
@@ -72,15 +71,20 @@ def _norm_text(v) -> str:
 # ---------- xlsx 汇总表 ----------
 
 def load_xlsx_rows() -> list[dict]:
-    """读取 资料/ 下最新的xlsx汇总表 → 原始行列表(仅含公司名列非空的行)"""
+    """读取 资料/ 下最新的xlsx汇总表 → 原始行列表(仅含公司名列非空的行)。
+
+    固定12列按位置映射(见COLUMNS), B~E/J~L允许留空。Excel打开时的~$锁文件跳过。
+    """
     import openpyxl
-    files = sorted(MATERIALS_DIR.glob("*.xlsx"), key=lambda p: p.stat().st_mtime, reverse=True)
-    rows = []
+    files = sorted((f for f in MATERIALS_DIR.glob("*.xlsx")
+                    if not f.name.startswith("~$")),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
     for f in files:
         try:
             wb = openpyxl.load_workbook(f, data_only=True, read_only=True)
         except Exception:
             continue
+        rows = []
         for ws in wb.worksheets:
             for row in ws.iter_rows(values_only=True):
                 if not row or not _norm_text(row[0]):
@@ -91,8 +95,8 @@ def load_xlsx_rows() -> list[dict]:
                 rows.append(rec)
         wb.close()
         if rows:
-            break
-    return rows
+            return rows
+    return []
 
 
 # ---------- 文件角色识别 ----------
@@ -211,8 +215,9 @@ def profiles() -> list[dict]:
             p.update(_match_id_images(images))
             p = _apply_overrides(company, p)
         today = date.today().isoformat()
-        for k in ("reg_no", "reg_state", "reg_city", "reg_addr",
-                  "rep_name", "rep_birth", "id_no", "id_exp"):
+        # 必需字段=代表人4项(照片识别不准, 必须表格录入)+公司名;
+        # reg_*不再必需(2026-09-08: 企业字段以PDF识别回填为准, 旧表有值则作兜底)
+        for k in ("rep_name", "rep_birth", "id_no", "id_exp"):
             if not p[k]:
                 p["issues"].append(f"缺少数据:{k}")
         if p["rep_birth"] and p["rep_birth"] >= today:
@@ -231,61 +236,284 @@ def profiles() -> list[dict]:
     return list(dedup.values())
 
 
-# ---------- 用量跟踪 ----------
+# ---------- 用量跟踪(槽位制: 一司最多 COMPANY_SLOTS 号) ----------
+
+COMPANY_SLOTS = 5  # 一个企业最多认证5个账号(2026-09-08用户确认, 机构名仍一名一用)
+_OPEN_SLOT = ("assigned", "failed")  # 未终态: 崩溃残留 / 提交未确认, 重试必须续上
+
+
+class SlotFullError(RuntimeError):
+    """写入新槽位时该公司已满(同邮箱更新不走这条)"""
+
+
+def _norm_usage(raw) -> dict:
+    """归一化为 {公司: [槽位dict...]}; 旧格式(公司→单条dict)惰性迁移为1条槽位"""
+    out = {}
+    for company, v in (raw or {}).items():
+        if isinstance(v, dict):
+            v = [v]
+        if isinstance(v, list):
+            slots = [dict(s) for s in v
+                     if isinstance(s, dict) and s.get("email")]
+            if slots:
+                out[company] = slots
+    return out
+
+
+def _usage_file() -> Path:
+    """运行时从 MATERIALS_DIR 派生。import 时固定的模块常量会让测试
+    (monkeypatch MATERIALS_DIR)把假数据写进真实 usage.json——
+    2026-09-10 实测踩坑, 测试污染了真实槽位记录。"""
+    return MATERIALS_DIR / "usage.json"
+
 
 def load_usage() -> dict:
-    return _read_json(USAGE_FILE, {})
+    return _norm_usage(_read_json(_usage_file(), {}))
 
 
 def save_usage(usage: dict) -> None:
-    MATERIALS_DIR.mkdir(exist_ok=True)
-    _write_json(USAGE_FILE, usage)
+    _write_json(_usage_file(), _norm_usage(usage))
 
 
-def mark_usage(company: str, email: str, status: str, note: str = "") -> None:
-    usage = load_usage()
-    usage[company] = {
-        "email": email,
-        "status": status,  # assigned / submitted / failed
+def available_slots(company: str, usage: dict | None = None) -> int:
+    usage = load_usage() if usage is None else usage
+    return max(0, COMPANY_SLOTS - len(usage.get(company) or []))
+
+
+# ---------- 服务端拉黑(营业执照认证账号达服务端上限等) ----------
+# 独立于usage.json: 本地槽位只统计本工具的用量, 服务端上限含历史/外部
+# 认证, 计数可能低估; 上传被服务端以"上限"类message拒绝时拉黑该公司,
+# 后续账号自动换下一家, 不再白试。删除 资料/blocked.json 对应条目可恢复。
+
+def _blocked_file() -> Path:
+    """运行时派生, 同 _usage_file()(2026-09-10测试踩坑: import时固定
+    常量导致monkeypatch MATERIALS_DIR不生效, 假拉黑记录写进真实文件)"""
+    return MATERIALS_DIR / "blocked.json"
+
+
+def load_blocked() -> dict:
+    return _read_json(_blocked_file(), {})
+
+
+def block_company(company: str, reason: str) -> None:
+    blocked = load_blocked()
+    if company in blocked:
+        return
+    blocked[company] = {
         "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "note": note,
+        "reason": reason,
     }
-    save_usage(usage)
+    MATERIALS_DIR.mkdir(exist_ok=True)
+    _write_json(_blocked_file(), blocked)
 
 
-def release_usage(company: str) -> bool:
-    """解除公司绑定回收复用。仅未提交(assigned/failed)才释放;
-
-    submitted=已成功绑定账号, 释放会导致一司二号, 一律拒绝(返回False)。
-    """
-    usage = load_usage()
-    entry = usage.get(company)
-    if not entry or entry.get("status") == "submitted":
+def unblock_company(company: str) -> bool:
+    blocked = load_blocked()
+    if company not in blocked:
         return False
-    del usage[company]
-    save_usage(usage)
+    blocked.pop(company)
+    _write_json(_blocked_file(), blocked)
     return True
 
 
+def mark_usage(company: str, email: str, status: str, note: str = "") -> int:
+    """记账该公司该邮箱的槽位(同公司同邮箱更新, 否则追加新槽位)。
+
+    追加时若已满 COMPANY_SLOTS 则抛 SlotFullError(同邮箱更新不受限)。
+    返回记账后该公司剩余可用槽位数。
+    """
+    usage = load_usage()
+    slots = usage.setdefault(company, [])
+    for s in slots:
+        if s.get("email") == email:
+            s.update(status=status,
+                     at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                     note=note or s.get("note", ""))
+            break
+    else:
+        if len(slots) >= COMPANY_SLOTS:
+            raise SlotFullError(
+                f"{company} 槽位已满({COMPANY_SLOTS}), 拒绝为 {email} 新增占用")
+        slots.append({
+            "email": email,
+            "status": status,  # assigned / submitted / failed
+            "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "note": note,
+        })
+    save_usage(usage)
+    return max(0, COMPANY_SLOTS - len(slots))
+
+
+def release_usage(company: str, email: str) -> bool:
+    """释放该公司该邮箱的槽位回收复用。submitted 槽位=已成功认证,
+    释放会导致同槽重复使用, 一律拒绝(返回False)。
+    """
+    usage = load_usage()
+    slots = usage.get(company) or []
+    for s in slots:
+        if s.get("email") == email and s.get("status") != "submitted":
+            slots.remove(s)
+            if not slots:
+                usage.pop(company, None)
+            save_usage(usage)
+            return True
+    return False
+
+
 def pick_company() -> dict | None:
-    """挑一家未使用且资料完整的公司(按xlsx行序)"""
+    """挑一家还有空槽且资料完整的公司(按xlsx行序, 先填满一家再换下一家)。
+
+    服务端拉黑的公司(blocked.json, 如营业执照认证账号已达服务端上限)
+    不再选取——本地槽位计数可能低估服务端侧历史用量(2026-09-09)。
+    """
+    blocked = load_blocked()
     usage = load_usage()
     for p in profiles():
-        if p["name"] in usage:
-            continue
-        if p["complete"]:
+        if (p["complete"] and p["name"] not in blocked
+                and available_slots(p["name"], usage) > 0):
             return p
     return None
 
 
+def find_open_slot(email: str, usage: dict | None = None) -> tuple[str, dict] | None:
+    """该邮箱的未终态槽位(assigned/failed)。多条时取最近一条, submitted 不计。"""
+    usage = load_usage() if usage is None else usage
+    found: list[tuple[str, dict]] = []
+    for company, slots in usage.items():
+        for s in slots:
+            if s.get("email") == email and s.get("status") in _OPEN_SLOT:
+                found.append((company, s))
+    if not found:
+        return None
+    found.sort(key=lambda x: x[1].get("at") or "", reverse=True)
+    company, slot = found[0]
+    return company, dict(slot)
+
+
+def profile_by_name(company: str) -> dict | None:
+    for p in profiles():
+        if p["name"] == company:
+            return p
+    return None
+
+
+def pick_company_for(email: str) -> dict | None:
+    """优先续上该邮箱未终态绑定; 没有则按行序挑空槽公司。
+
+    有未终态绑定但资料已不完整/不在表中时, 仍返回该公司档案(complete=False),
+    调用方必须报错, 不得改绑新公司(否则一号占两槽)。
+    例外: 绑定的公司已被服务端拉黑(执照达认证上限)——服务端已明确拒绝
+    该执照, 认证不可能通过它完成, 释放未终态槽位后改选下一家(2026-09-09)。
+    """
+    binding = find_open_slot(email)
+    if not binding:
+        return pick_company()
+    company, _ = binding
+    if company in load_blocked():
+        release_usage(company, email)
+        return pick_company()
+    p = profile_by_name(company)
+    if p:
+        return p
+    return {
+        "name": company,
+        "complete": False,
+        "issues": ["续用上次绑定但该公司已不在汇总表"],
+    }
+
+
+def drop_extra_open_slots(email: str, keep_company: str) -> list[str]:
+    """同一邮箱只保留 keep_company 上的未终态槽, 其它公司上的 assigned/failed 释放。
+
+    submitted 不动。返回被回收的公司名列表。
+    """
+    usage = load_usage()
+    dropped: list[str] = []
+    changed = False
+    for company, slots in list(usage.items()):
+        if company == keep_company:
+            continue
+        kept = []
+        for s in slots:
+            if s.get("email") == email and s.get("status") in _OPEN_SLOT:
+                dropped.append(company)
+                changed = True
+            else:
+                kept.append(s)
+        if kept:
+            usage[company] = kept
+        else:
+            usage.pop(company, None)
+    if changed:
+        save_usage(usage)
+    return dropped
+
+
+def reclaim_assigned() -> list[dict]:
+    """回收崩溃残留: 只释放 status=assigned 的槽(从未点提交)。
+
+    failed=已点提交未确认, 可能平台已受理, 不回收, 由重试续上。
+    submitted 终态不回收。返回 [{company, email}, ...]。
+    """
+    usage = load_usage()
+    reclaimed: list[dict] = []
+    changed = False
+    for company, slots in list(usage.items()):
+        kept = []
+        for s in slots:
+            if s.get("status") == "assigned":
+                reclaimed.append({"company": company, "email": s.get("email")})
+                changed = True
+            else:
+                kept.append(s)
+        if kept:
+            usage[company] = kept
+        else:
+            usage.pop(company, None)
+    if changed:
+        save_usage(usage)
+    return reclaimed
+
+
+def count_assigned() -> int:
+    return sum(1 for slots in load_usage().values()
+               for s in slots if s.get("status") == "assigned")
+
+
 def summary() -> tuple[int, int, list[str]]:
-    """(完整可用数, 已绑定数, 问题公司列表)"""
+    """(可用槽位总数, 已占用槽位数, 问题公司列表)
+
+    槽位=公司×5; 与待认证账号数直接可比(GUI预检/截断依据)。
+    服务端拉黑的公司(blocked.json)可用槽位计0(选不到即不可用)。
+    """
+    usage = load_usage()
+    blocked = load_blocked()
+    allp = profiles()
+    ok = used = 0
+    for p in allp:
+        if not p["complete"]:
+            continue
+        n = len(usage.get(p["name"]) or [])
+        used += min(n, COMPANY_SLOTS)
+        if p["name"] in blocked:
+            continue
+        ok += max(0, COMPANY_SLOTS - n)
+    problems = [f"{p['name']}: {'; '.join(p['issues'])}" for p in allp if not p["complete"]]
+    return ok, used, problems
+
+
+def company_counts() -> tuple[int, int, int, int]:
+    """公司数统计: (总家数, 已占用家数, 空闲家数, 资料不全家数)
+
+    已占用=有槽位记录的公司(不论槽位是否用满); 空闲=资料完整且无任何槽位记录。
+    """
     usage = load_usage()
     allp = profiles()
-    used = [p for p in allp if p["name"] in usage]
-    ok = [p for p in allp if p["complete"] and p["name"] not in usage]
-    problems = [f"{p['name']}: {'; '.join(p['issues'])}" for p in allp if not p["complete"]]
-    return len(ok), len(used), problems
+    total = len(allp)
+    used = sum(1 for p in allp if usage.get(p["name"]))
+    incomplete = sum(1 for p in allp if not p["complete"])
+    free = sum(1 for p in allp if p["complete"] and not usage.get(p["name"]))
+    return total, used, free, incomplete
 
 
 # ---------- 资料不全归档 ----------
