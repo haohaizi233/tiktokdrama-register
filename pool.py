@@ -154,3 +154,64 @@ def migrate_legacy() -> None:
             "cookies": data.get("cookies", []),
             "origins": data.get("origins", []),
         })
+
+
+def reclaim_stale_assignments() -> dict:
+    """启动时回收崩溃残留的 assigned 占用(从未点提交)。failed 不回收。
+
+    返回 {"slots": [...], "institutions": [...]}。
+    """
+    import institutions
+    import materials
+    return {
+        "slots": materials.reclaim_assigned(),
+        "institutions": institutions.reclaim_assigned(),
+    }
+
+
+def select_certifiable(targets: list[dict]) -> tuple[list[dict], list[tuple[str, str]]]:
+    """按库存挑选本次可认证账号: 未终态绑定优先续上, 新号才消耗空槽/空机构名。
+
+    续用公司资料不全时跳过该号、不改绑(避免一号占两槽)。
+    返回 (可跑列表, [(email, 跳过原因)...])。
+    """
+    import institutions
+    import materials
+    try:
+        free_slots, _, _ = materials.summary()
+    except Exception:
+        free_slots = 0
+    free_inst, _ = institutions.summary()
+    picked: list[dict] = []
+    skipped: list[tuple[str, str]] = []
+    for a in targets:
+        email = a.get("email") or ""
+        slot = materials.find_open_slot(email)
+        inst = institutions.find_open(email)
+        if slot:
+            company, _ = slot
+            profile = materials.profile_by_name(company)
+            if not profile:
+                skipped.append((email, f"续用公司[{company}]已不在汇总表, 保持原绑定不改绑"))
+                continue
+            if not profile.get("complete"):
+                issues = "; ".join(profile.get("issues") or [])
+                skipped.append((
+                    email,
+                    f"续用公司[{company}]资料不全({issues}), 保持原绑定不改绑",
+                ))
+                continue
+        need_slot = slot is None
+        need_inst = inst is None
+        if need_slot and free_slots <= 0:
+            skipped.append((email, "无可用公司槽位"))
+            continue
+        if need_inst and free_inst <= 0:
+            skipped.append((email, "无可用机构名"))
+            continue
+        if need_slot:
+            free_slots -= 1
+        if need_inst:
+            free_inst -= 1
+        picked.append(a)
+    return picked, skipped

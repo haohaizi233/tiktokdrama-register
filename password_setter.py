@@ -29,6 +29,7 @@ from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
 import certifier
+import hubstudio
 import pool
 import registrar
 
@@ -92,8 +93,9 @@ def _collapse_panels(page) -> None:
 
 def _account_menu(page):
     """账户菜单定位。优先"退出登录"文本过滤: 已设置过密码的账号菜单里
-    是"修改密码"而非"设置密码", 用退出登录兜底才能匹配到菜单本体。"""
-    for kw in ("退出登录", "设置密码", "修改密码"):
+    是"重置密码"而非"设置密码"(2026-09-09实测DOM), 用退出登录兜底才能
+    匹配到菜单本体。"""
+    for kw in ("退出登录", "设置密码", "重置密码", "修改密码"):
         loc = page.locator(_MENU_SEL).filter(has_text=kw)
         if loc.count():
             return loc
@@ -157,9 +159,16 @@ def _open_account_menu(page, log, stop_event):
 
 
 def _click_set_password_item(page, menu, log, stop_event) -> None:
-    """点击菜单项"设置密码"; 菜单项为"修改密码"说明该账号已有密码"""
-    if menu.get_by_text("修改密码", exact=True).count():
-        raise PasswordError(ALREADY_SET, "菜单项为[修改密码], 该账号已设置过密码")
+    """点击菜单项"设置密码"; 菜单项为"重置密码"说明该账号已有密码。
+
+    已有密码的账号菜单显示"重置密码"(2026-09-09实测DOM: menuItem内
+    span.itemLabel文本=重置密码), 直接判ALREADY_SET不再打开重置弹窗
+    (重置流程非本工具目标, 误入会把已有密码当新密码改写)。"""
+    for kw in ("重置密码", "修改密码"):  # 修改密码=旧猜测, 保留兜底
+        if menu.get_by_text(kw, exact=True).count():
+            log(f"  菜单项为[{kw}], 该账号之前已设置过密码, 跳过", "dim")
+            raise PasswordError(ALREADY_SET,
+                                f"菜单项为[{kw}], 该账号已设置过密码")
     item = menu.get_by_text("设置密码", exact=True)
     deadline = time.time() + 5
     while time.time() < deadline and item.count() == 0:
@@ -455,13 +464,16 @@ class PasswordSetter:
 
     def __init__(self, accounts: list[dict], headless: bool = False,
                  log=None, progress=None, code_timeout: int = 180,
-                 stop_event: Event | None = None):
+                 stop_event: Event | None = None,
+                 use_hubstudio: bool = False, rotate_ip: bool = False):
         self.accounts = accounts
         self.headless = headless
         self.log = log or _default_log
         self.progress = progress or (lambda done, total: None)
         self.code_timeout = code_timeout
         self.stop_event = stop_event or Event()
+        self.use_hub = use_hubstudio
+        self.rotate_ip = rotate_ip and use_hubstudio
 
     def _stopped(self) -> bool:
         return self.stop_event.is_set()
@@ -480,11 +492,12 @@ class PasswordSetter:
         total = len(self.accounts)
         ok = fail = skip = 0
         self.log(f"开始设置账户密码 {total} 个账号")
+        if self.rotate_ip:
+            self.log("每账号新IP: HubStudio代理对每个窗口自动分配独立出口IP(零额度), "
+                     "本次实测并记录每账号IP", "dim")
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            browser = None
+            chain = None  # Hub模式单窗交接链
             try:
                 for i, acc in enumerate(self.accounts, 1):
                     if self._stopped():
@@ -495,14 +508,31 @@ class PasswordSetter:
                     self.log(f"[{i}/{total}] === {email} ===")
                     page = context = None
                     try:
+                        if self.use_hub:
+                            if browser is None:
+                                browser = hubstudio.connect(
+                                    p, log=self.log, headless=self.headless)
+                                chain = hubstudio.WindowChain(browser, log=self.log)
+                        elif browser is None:
+                            browser = p.chromium.launch(
+                                headless=self.headless,
+                                args=["--disable-blink-features=AutomationControlled"],
+                            )
                         page, context = certifier.open_session(
                             browser, email, log=self.log,
                             code_timeout=self.code_timeout,
-                            stop_event=self.stop_event, shoot=self._shoot)
+                            stop_event=self.stop_event, shoot=self._shoot,
+                            use_hub=self.use_hub, chain=chain)
+                        ip = (hubstudio.context_ip(page)
+                              if self.use_hub and self.rotate_ip else None)
+                        if ip:
+                            self.log(f"  出口IP: {ip}", "dim")
                         set_account_password(page, email, log=self.log,
                                              stop_event=self.stop_event,
                                              shoot=self._shoot)
                         ok += 1
+                        if ip:
+                            pool.update_account(email, last_ip=ip)
                         self.log(f"[{i}/{total}] >>> {email} 密码设置成功", "ok")
                     except PasswordError as e:
                         if self._stopped():
@@ -524,9 +554,13 @@ class PasswordSetter:
                             if page:
                                 self._shoot(page, f"pwd_error_{email.split('@')[0]}")
                     finally:
-                        if context:
+                        if context and not self.use_hub:
+                            # Hub模式窗口由WindowChain交接(账号末不关: 零窗口会杀死浏览器)
                             context.close()
             finally:
-                browser.close()
+                if browser:
+                    browser.close()
+                if self.use_hub:  # close只断CDP连接, 环境进程需API关闭
+                    hubstudio.close_env(log=self.log)
         self.progress(total, total)
         return ok, fail, skip

@@ -15,6 +15,7 @@ from threading import Event
 from playwright.sync_api import TimeoutError as PWTimeout
 from playwright.sync_api import sync_playwright
 
+import hubstudio
 import mail_api
 import pool
 
@@ -210,10 +211,14 @@ def login_with_code(page, email: str, *, log=None, code_timeout: int = 180,
 class Registrar:
     def __init__(self, accounts: list[dict], headless: bool = False,
                  log=None, progress=None, code_timeout: int = 180,
-                 stop_event: Event | None = None, after_register=None):
+                 stop_event: Event | None = None, after_register=None,
+                 use_hubstudio: bool = False, rotate_ip: bool = False):
         """
         after_register(page, email, shoot): 注册成功后立即回调(同一已登录page),
         用于自动企业认证等; shoot(page, name)用于失败留档截图; 异常只记日志, 不影响注册结果。
+        use_hubstudio: 接管HubStudio指纹环境(指纹/代理由环境承载)而非裸起Chromium。
+        rotate_ip: HubStudio模式下每个账号开始前强制重开环境换新出口IP
+        (每账号消耗1次环境打开额度; 同一账号的注册→认证→密码仍在同一IP内完成)。
         """
         self.accounts = accounts
         self.headless = headless
@@ -222,6 +227,8 @@ class Registrar:
         self.code_timeout = code_timeout
         self.stop_event = stop_event or Event()
         self.after_register = after_register
+        self.use_hub = use_hubstudio
+        self.rotate_ip = rotate_ip and use_hubstudio
 
     def _stopped(self) -> bool:
         return self.stop_event.is_set()
@@ -240,11 +247,12 @@ class Registrar:
         total = len(self.accounts)
         ok = fail = 0
         self.log(f"开始处理 {total} 个账号")
+        if self.rotate_ip:
+            self.log("每账号新IP: HubStudio代理对每个窗口自动分配独立出口IP(零额度), "
+                     "本次实测并记录每账号IP", "dim")
         with sync_playwright() as p:
-            browser = p.chromium.launch(
-                headless=self.headless,
-                args=["--disable-blink-features=AutomationControlled"],
-            )
+            browser = None
+            chain = None  # Hub模式单窗交接链
             try:
                 for i, acc in enumerate(self.accounts, 1):
                     if self._stopped():
@@ -253,22 +261,42 @@ class Registrar:
                     self.progress(i - 1, total)
                     email = acc["email"]
                     self.log(f"[{i}/{total}] === {email} ===")
-                    context = browser.new_context(
-                        locale="zh-CN",
-                        timezone_id="Asia/Shanghai",
-                        viewport={"width": 1380, "height": 900},
-                        user_agent=UA,
-                    )
-                    context.add_init_script(
-                        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-                    )
-                    page = context.new_page()
+                    page = context = None
                     try:
+                        if self.use_hub:
+                            if browser is None:
+                                browser = hubstudio.connect(
+                                    p, log=self.log, headless=self.headless)
+                                chain = hubstudio.WindowChain(browser, log=self.log)
+                            # 单窗交接: 第1账号直接用环境自带窗, 之后每账号新窗+关上一窗
+                            # (每账号新context=新出口IP, cookie隔离照旧)
+                            page, context = chain.acquire()
+                        else:
+                            if browser is None:
+                                browser = p.chromium.launch(
+                                    headless=self.headless,
+                                    args=["--disable-blink-features=AutomationControlled"],
+                                )
+                            context = browser.new_context(
+                                locale="zh-CN",
+                                timezone_id="Asia/Shanghai",
+                                viewport={"width": 1380, "height": 900},
+                                user_agent=UA,
+                            )
+                            context.add_init_script(
+                                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+                            )
+                            page = context.new_page()
+                        ip = (hubstudio.context_ip(page)
+                              if self.use_hub and self.rotate_ip else None)
+                        if ip:
+                            self.log(f"  出口IP: {ip}", "dim")
                         self.register_one(page, acc)
                         pool.update_account(
                             email,
                             status="registered",
                             registered_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            last_ip=ip,
                             last_error=None,
                         )
                         ok += 1
@@ -285,11 +313,17 @@ class Registrar:
                             pool.update_account(email, status="failed", last_error=str(e)[:300])
                             fail += 1
                             self.log(f"[{i}/{total}] >>> {email} 失败: {e}", "err")
-                            self._shoot(page, "error")
+                            if page:
+                                self._shoot(page, "error")
                     finally:
-                        context.close()
+                        if context and not self.use_hub:
+                            # Hub模式窗口由WindowChain交接(账号末不关: 零窗口会杀死浏览器)
+                            context.close()
             finally:
-                browser.close()
+                if browser:
+                    browser.close()
+                if self.use_hub:  # close只断CDP连接, 环境进程需API关闭
+                    hubstudio.close_env(log=self.log)
         self.progress(total, total)
         return ok, fail
 
