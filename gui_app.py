@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""图形界面: ①导入账号 → ②导入机构名 → ③号池管理 → ④自动注册+企业认证+设置密码
+"""图形界面: 两个业务页(Notebook 跳转)
+
+短剧注册: ①导入账号 → ②导入机构名 → ③号池管理 → ④自动注册+企业认证+设置密码
+执照翻译: 中文营业执照照片 → 固定英文模板 PDF
 
 线程模型: 注册/认证在工作线程执行, 通过 queue 把日志/进度/完成事件发回主线程渲染。
 企业认证: 注册后自动认证(同页面免重登) 或 独立批量认证已注册账号(会话恢复, 过期自动重登);
@@ -19,6 +22,7 @@ import institutions
 import materials
 import password_setter
 import pool
+from license_gui import LicensePage
 from registrar import Registrar
 
 ROOT = Path(__file__).resolve().parent
@@ -61,7 +65,7 @@ def _hub_precheck(log):
 class App(tk.Tk):
     def __init__(self, auto_close: bool = False):
         super().__init__()
-        self.title("TikTok短剧中心 自动注册+企业认证工具")
+        self.title("短剧注册 / 执照翻译")
         self.geometry("1120x880")
         self.minsize(1120, 720)  # ④区操作行(参数+4按钮)实测需~1086px, 再窄按钮截断
         self.q: queue.Queue = queue.Queue()
@@ -73,10 +77,11 @@ class App(tk.Tk):
         self._login_release = None
         self._login_handle = None  # 驻留中的浏览器 (playwright, browser)
         self.auto_close = auto_close
+        self._log_buffer: list[str] = []
         self._build_style()
         self._build_ui()
         self.refresh_pool()
-        self.after(150, self._drain)
+        self.after(50, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._append_log("就绪。流程: ①导入账号 → ②导入机构名 → ③确认号池 → ④开始注册(可勾选自动企业认证/设置密码)", "dim")
 
@@ -88,10 +93,18 @@ class App(tk.Tk):
         except tk.TclError:
             pass
         self.option_add("*Font", FONT)
+        style.configure("TNotebook.Tab", padding=(18, 6), font=FONT)
 
     def _build_ui(self):
+        self.nb = ttk.Notebook(self)
+        self.nb.pack(fill="both", expand=True, padx=6, pady=(6, 8))
+        self.page_reg = ttk.Frame(self.nb)
+        self.nb.add(self.page_reg, text="  短剧注册  ")
+        self.page_lic = LicensePage(self.nb)
+        self.nb.add(self.page_lic, text="  执照翻译  ")
+
         # ① 导入区
-        f1 = ttk.LabelFrame(self, text=" ① 导入账号(选txt文件 或 粘贴文本) ")
+        f1 = ttk.LabelFrame(self.page_reg, text=" ① 导入账号(选txt文件 或 粘贴文本) ")
         f1.pack(fill="x", padx=12, pady=(10, 4))
         bar1 = ttk.Frame(f1)
         bar1.pack(fill="x", padx=10, pady=(6, 4))
@@ -105,7 +118,7 @@ class App(tk.Tk):
         self.txt_paste.pack(fill="x", padx=10, pady=(0, 8))
 
         # ② 导入机构名区
-        f2 = ttk.LabelFrame(self, text=" ② 导入机构名(认证表单机构名称, 按队列唯一分配, 一名一用) ")
+        f2 = ttk.LabelFrame(self.page_reg, text=" ② 导入机构名(认证表单机构名称, 按队列唯一分配, 一名一用) ")
         f2.pack(fill="x", padx=12, pady=4)
         bar2 = ttk.Frame(f2)
         bar2.pack(fill="x", padx=10, pady=(6, 4))
@@ -121,7 +134,7 @@ class App(tk.Tk):
         self.txt_inst_paste.pack(fill="x", padx=10, pady=(0, 8))
 
         # ③ 号池区
-        f2 = ttk.LabelFrame(self, text=" ③ 号池(pool_data/ 文件夹内全部json自动合并) ")
+        f2 = ttk.LabelFrame(self.page_reg, text=" ③ 号池(pool_data/ 文件夹内全部json自动合并) ")
         f2.pack(fill="both", padx=12, pady=4)
         # 统计行(上): 三个统计标签右对齐(逆序pack保阅读顺序, 右缘统一-8px)
         stat = ttk.Frame(f2)
@@ -180,7 +193,7 @@ class App(tk.Tk):
         self.tree.tag_configure("unused", foreground="#555555")
 
         # ④ 注册+认证+密码区
-        f3 = ttk.LabelFrame(self, text=" ④ 自动注册 + 企业认证 + 设置密码 ")
+        f3 = ttk.LabelFrame(self.page_reg, text=" ④ 自动注册 + 企业认证 + 设置密码 ")
         f3.pack(fill="both", expand=True, padx=12, pady=(4, 10))
         # 选项行(上): 5个复选框右端对齐(逆序pack, 右缘与下行「■ 停止」按钮齐平)
         bar3 = ttk.Frame(f3)
@@ -201,6 +214,9 @@ class App(tk.Tk):
         self.chk_headless = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar3, text="无头模式(后台运行不弹浏览器)",
                         variable=self.chk_headless).pack(side="right", padx=(0, 14))
+        self.chk_parallel_lic = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar3, text="并行执照翻译(扫描执照库)",
+                        variable=self.chk_parallel_lic).pack(side="right", padx=(0, 14))
         # 操作行(下): 消耗数 + 按钮组
         bar4 = ttk.Frame(f3)
         bar4.pack(fill="x", padx=10, pady=(2, 6))
@@ -546,6 +562,59 @@ class App(tk.Tk):
             target=self._work, args=(targets, headless, use_hub, rot_ip, autocert, autopwd),
             daemon=True)
         self.worker.start()
+        # Parallel license translation: scan 执照库 in background
+        if self.chk_parallel_lic.get():
+            self._start_parallel_license_scan()
+
+    def _start_parallel_license_scan(self):
+        """Start background license library scan while registration runs."""
+        source = ROOT / "中国执照库"
+        if not source.exists():
+            self._append_log("并行执照翻译: 执照库不存在, 跳过", "dim")
+            return
+        company_dirs = [d for d in source.iterdir() if d.is_dir()]
+        if not company_dirs:
+            self._append_log("并行执照翻译: 执照库为空, 跳过", "dim")
+            return
+        self._append_log(
+            f"并行执照翻译: 扫描执照库 {len(company_dirs)} 家公司 "
+            f"(后台运行, 不影响注册)", "warn")
+        self._lic_stop = threading.Event()
+        self._lic_thread = threading.Thread(
+            target=self._work_parallel_license,
+            args=(source, ROOT / "资料", self._lic_stop),
+            daemon=True)
+        self._lic_thread.start()
+
+    def _work_parallel_license(self, source: Path, dest: Path, stop_event: threading.Event):
+        def log(msg, level="info"):
+            self.q.put(("log", level, f"[执照] {msg}"))
+
+        try:
+            from license_trans.ocr import LicenseOCR
+            from license_trans.pipeline import process_license_library
+        except ImportError as e:
+            log(f"执照翻译依赖缺失: {e}", "err")
+            return
+        try:
+            engine = LicenseOCR()
+        except Exception as e:
+            log(f"OCR 引擎加载失败: {e}", "err")
+            return
+        prov = getattr(engine, "gpu_provider", "CPU")
+        eng = getattr(engine, "engine_name", "RapidOCR")
+        log(f"OCR 引擎就绪: {eng} ({prov}), 开始并行扫描+翻译…", "ok")
+        try:
+            result = process_license_library(
+                source, dest, max_workers=5, engine=engine,
+                log=log, stop_event=stop_event)
+            log(
+                f"===== 执照翻译完成: 翻译 {result['processed']} / "
+                f"失败 {result['failed']} / 移动 {result['moved']} / "
+                f"跳过 {result['skipped']} =====",
+                "ok" if result["failed"] == 0 else "warn")
+        except Exception as exc:
+            log(f"执照翻译异常: {exc}", "err")
 
     def _work(self, targets, headless: bool, use_hub: bool, rot_ip: bool,
               autocert: bool, autopwd: bool):
@@ -873,8 +942,10 @@ class App(tk.Tk):
 
     # ---------- 事件循环 ----------
     def _drain(self):
+        MAX_PER_TICK = 10
+        processed = 0
         try:
-            while True:
+            while processed < MAX_PER_TICK:
                 msg = self.q.get_nowait()
                 kind = msg[0]
                 if kind == "log":
@@ -958,9 +1029,20 @@ class App(tk.Tk):
                         self._append_log(f"===== {email} 登录失败: {err} =====", "err")
                         if not self.auto_close:
                             messagebox.showerror("登录失败", f"{email}\n\n{err}", parent=self)
+                processed += 1
         except queue.Empty:
             pass
-        self.after(150, self._drain)
+
+        # Batch flush log buffer to file (one write per tick)
+        if self._log_buffer:
+            try:
+                with open(ROOT / "gui.log", "a", encoding="utf-8") as f:
+                    f.writelines(self._log_buffer)
+            except OSError:
+                pass
+            self._log_buffer.clear()
+
+        self.after(50, self._drain)
 
     def _set_running(self, running: bool):
         st = "disabled" if running else "normal"
@@ -983,6 +1065,10 @@ class App(tk.Tk):
         if self._login_state == "running" and self.stop_event:
             self.stop_event.set()  # 驻留前的登录流程中止
         self._release_login()
+        if getattr(self, "_lic_stop", None):
+            self._lic_stop.set()
+        if getattr(self, "page_lic", None):
+            self.page_lic.request_stop()
         self.destroy()
 
     def _append_log(self, text: str, level: str = "info"):
@@ -990,11 +1076,8 @@ class App(tk.Tk):
         self.log_text.insert("end", text + "\n", level if level in LOG_TAGS else "info")
         self.log_text.see("end")
         self.log_text.config(state="disabled")
-        try:
-            with open(ROOT / "gui.log", "a", encoding="utf-8") as f:
-                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S} [{level}] {text}\n")
-        except OSError:
-            pass
+        self._log_buffer.append(
+            f"{datetime.now():%Y-%m-%d %H:%M:%S} [{level}] {text}\n")
 
 def run(smoke: bool = False, auto: int = 0) -> None:
     pool.migrate_legacy()

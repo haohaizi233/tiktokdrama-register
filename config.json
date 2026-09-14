@@ -1,0 +1,15 @@
+{
+  "ocr_engine": "auto",
+  "translator": {
+    "name": "Niu Mengyuan",
+    "catti_no": "20201100937000000097",
+    "organization": "E-TRANSTAR (Beijing) International Translation Co., Ltd.",
+    "tel": "010-60537024",
+    "email": "ailier@57trans.com",
+    "address": "Room 221-0281, 2nd Floor, Building 1, No. 3 Baiyang Road, Fangshan District, Beijing"
+  },
+  "fonts": {
+    "regular": "C:/Windows/Fonts/times.ttf",
+    "bold": "C:/Windows/Fonts/timesbd.ttf"
+  }
+}

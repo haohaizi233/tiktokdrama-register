@@ -1,12 +1,17 @@
-# TikTok短剧中心 自动注册 + 企业认证 + 设置密码工具（GUI版）
+# TikTok短剧中心 自动注册 + 企业认证 + 设置密码 / 营业执照英译（GUI版）
 
-购买的 Outlook 邮箱（`邮箱----密码----client_id----令牌`）自动注册 TikTok 短剧创作者平台，验证码通过取件API自动获取，登录凭证自动保存；注册后可用美国公司资料自动完成**企业认证**提交（**一个企业最多认证 5 个账号**，机构名一名一用，可复用于后续同格式资料），并自动**设置账户密码**（密码=号池中该账号的邮箱密码，可在界面一键导出 邮箱/密码/企业名 Excel 清单）。
+购买的 Outlook 邮箱（`邮箱----密码----client_id----令牌`）自动注册 TikTok 短剧创作者平台，验证码通过取件API自动获取，登录凭证自动保存；注册后可用美国公司资料自动完成**企业认证**提交（**一个企业最多认证 5 个账号**，机构名一名一用，可复用于后续同格式资料），并自动**设置账户密码**（密码=号池中该账号的邮箱密码，可在界面一键导出 邮箱/密码/企业名 Excel 清单）。另含 **A 格式公司法人营业执照** 照片 → 固定英文模板 PDF。
 
 ## 小白使用
 
-**双击 `启动.bat` 即可。**
+**双击 `启动.bat` 即可。** 顶部两个页签：
 
-首次运行会自动安装依赖（playwright + openpyxl + Chromium浏览器，约150MB），之后秒开。
+| 页签 | 做什么 |
+|---|---|
+| **短剧注册** | 导入账号/机构名、号池、自动注册 + 企业认证 + 设置密码 |
+| **执照翻译** | 加入中文营业执照照片，批量转成英文模板 PDF（第 1 页译文，第 2 页原件）。只处理 A 格式公司法人执照；个体户/合伙/分公司会标「非A格式」。红章日期看不清可勾选「指定发证日期」 |
+
+首次运行会自动安装依赖（playwright + openpyxl + Chromium浏览器，约150MB），之后秒开。执照翻译页第一次点「开始转换」会再装 OCR 相关库。
 
 界面四步走：
 1. **① 导入账号**：点「选择 txt 文件导入…」选账号文件，或把账号文本粘贴到框里点「导入下方粘贴内容」
@@ -109,6 +114,8 @@ CLI 等价开关：`python register.py --hubstudio`（注册/认证/密码三个
 | `资料/usage.json` | 公司槽位绑定与认证结果（每公司最多5条槽位记录） |
 | `gui.log` | GUI运行日志留档 |
 | `logs/` | 每步截图与失败现场 |
+| `license_out/` | 执照翻译输出的英文模板 PDF |
+| `license_work/` | 执照翻译抽取 JSON 与纠偏预览 |
 
 ## 命令行（可选）
 
@@ -121,25 +128,32 @@ python register.py --cert      # 只认证: 批量处理已注册未认证账号
 python register.py --pwd       # 只设置密码: 批量给已注册账号设置账户密码
 python register.py --hubstudio # 以上命令均可加: 接管HubStudio指纹环境(VIP套餐)
 python register.py --hubstudio --rotate-ip  # 再加: 实测并记录每账号出口IP(零额度, 代理自动隔离)
+python batch.py 照片.jpg -o license_out     # 执照翻译CLI: 照片→英文模板PDF
+python batch.py 照片文件夹 -o license_out --issue-date 2022-12-09
 ```
 
 ## 架构
 
 ```
 启动.bat / run_gui.py   入口: tkinter缺失自动切换解释器, 依赖缺失自动安装
-└─ gui_app.py           界面: 导入账号/导入机构名/号池/注册+认证+密码四区, 线程+queue通信, 可停止, 导出Excel
-   ├─ pool.py           号池: pool_data/多json合并去重, 状态+认证/密码状态维护
-   ├─ institutions.py   机构名库: 队列一名一用分配(institutions.json), 导入/分配/释放/记账
-   ├─ hubstudio.py      指纹浏览器接入: Local API开/关环境+CDP接管+额度复用(VIP, 可选)
-   ├─ registrar.py      注册引擎: login_with_code邮箱验证码登录(GUI/CLI/认证/密码共用), save_auth凭证保存
-   │  └─ mail_api.py    取件: POST /api/v1/tool/mail/search 轮询+验证码提取
-   ├─ certifier.py      认证引擎: open_session会话恢复/过期重登+表单填写+上传+提交, 公司槽位(一司5号)+机构名一名一用记账
-   │  └─ materials.py   资料解析: xlsx+公司文件夹+文件角色识别+槽位用量跟踪(一司5号)
-   ├─ password_setter.py 密码引擎: 账户菜单→设置密码弹窗→提交→结果判定, 批量独立运行
-   └─ pool_data/ auth/ 资料/ logs/
+└─ gui_app.py           界面: Notebook 两页(短剧注册 / 执照翻译)
+   ├─ 短剧注册页        导入账号/导入机构名/号池/注册+认证+密码四区, 线程+queue通信
+   │  ├─ pool.py           号池: pool_data/多json合并去重, 状态+认证/密码状态维护
+   │  ├─ institutions.py   机构名库: 队列一名一用分配(institutions.json), 导入/分配/释放/记账
+   │  ├─ hubstudio.py      指纹浏览器接入: Local API开/关环境+CDP接管+额度复用(VIP, 可选)
+   │  ├─ registrar.py      注册引擎: login_with_code邮箱验证码登录(GUI/CLI/认证/密码共用)
+   │  │  └─ mail_api.py    取件: POST /api/v1/tool/mail/search 轮询+验证码提取
+   │  ├─ certifier.py      认证引擎: 会话恢复/过期重登+表单填写+上传+提交
+   │  │  └─ materials.py   资料解析: xlsx+公司文件夹+文件角色识别+槽位用量跟踪
+   │  └─ password_setter.py 密码引擎: 账户菜单→设置密码弹窗→提交→结果判定
+   ├─ license_gui.py    执照翻译页: 收件队列+OCR转换+英文页预览
+   │  └─ license_trans/ 抽取/术语翻译/固定英文模板 PDF
+   │     └─ glossary/ assets/ config.json
+   └─ pool_data/ auth/ 资料/ logs/ license_out/
 ```
 
 ## 依赖
 
 - Windows + Python 3.10+（任意官方安装版；若当前解释器缺tkinter会自动寻找并切换到可用的Python）
 - playwright、openpyxl（首次运行自动安装）
+- 执照翻译另需 rapidocr-onnxruntime、opencv-python、pymupdf 等（第一次点「开始转换」自动安装）

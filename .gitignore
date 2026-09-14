@@ -18,6 +18,10 @@ hubstudio_state.json
 _ocr_tmp/
 _备份/
 
+license_out/
+license_work/
+中国执照库/
+
 # ===== 日志 =====
 *.log
 
