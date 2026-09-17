@@ -208,6 +208,42 @@ _USCI_RE = re.compile(r"[0-9A-HJ-NPQRTUWXY]{2}\d{6}[0-9A-HJ-NPQRTUWXY]{10}")
 _SCOPE_HEADS = ("一般项目", "许可项目", "一般经营项目", "许可经营项目")
 
 
+def _title_line(lines: list[OcrLine]) -> OcrLine | None:
+    """Largest box whose text is the 营业执照 heading (not 副本-only noise)."""
+    best: OcrLine | None = None
+    best_area = 0.0
+    for ln in lines:
+        t = re.sub(r"\s+", "", ln.text or "")
+        if "营业执照" not in t:
+            continue
+        area = max(0.0, ln.x1 - ln.x0) * max(0.0, ln.y1 - ln.y0)
+        if area > best_area:
+            best, best_area = ln, area
+    return best
+
+
+def _title_sits_on_top(lines: list[OcrLine], height: float) -> bool:
+    title = _title_line(lines)
+    if title is None or height <= 0:
+        return False
+    tw, th = title.x1 - title.x0, title.y1 - title.y0
+    return tw >= th and title.cy <= height * 0.42
+
+
+def _orientation_score(lines: list[OcrLine], height: float) -> tuple:
+    """Prefer reading-upright layout over raw keyword count.
+
+    WeChat OCR still hits 营业执照 on a phone-portrait 横版 shot, so keyword
+    count alone keeps k=0 (sideways). Horizontal boxes + title-on-top win.
+    """
+    n = max(len(lines), 1)
+    horiz = sum(1 for ln in lines if (ln.x1 - ln.x0) > (ln.y1 - ln.y0) * 1.2)
+    hits = _keyword_hits(lines)
+    order = _order_score(lines)
+    top = 1 if _title_sits_on_top(lines, height) else 0
+    return (top, horiz, hits, order, n)
+
+
 def _order_score(lines: list[OcrLine]) -> int:
     """Reading-order check for orientation selection.
 
@@ -748,10 +784,10 @@ class LicenseOCR:
         Returns (oriented_image, lines). When ``meta`` is provided it is
         filled with:
           - "rotation": chosen k (np.rot90 count applied to the source)
-          - "vertical_native": True when the source photo shows a portrait
-            license with vertical text columns (竖版执照). For those the k=1
-            OCR view lays the paper on its side, so callers that want the
-            document's natural upright look must rotate the result back.
+          - "vertical_native": True when the unrotated source looks like a
+            portrait vertical-text license (or a sideways 横版 phone photo).
+            The returned image is already in reading orientation; PDF
+            embedding should keep it and not restore the camera file.
         """
         image = _ensure_min_size(_downscale(_read_image(path), max_side=max_side))
         best_img = image
@@ -768,33 +804,36 @@ class LicenseOCR:
         if cached_lines is not None:
             hits = _keyword_hits(cached_lines)
             horiz = sum(1 for ln in cached_lines if (ln.x1 - ln.x0) > (ln.y1 - ln.y0) * 1.2)
-            best_score = (hits, horiz, _order_score(cached_lines), len(cached_lines))
+            best_score = _orientation_score(cached_lines, image.shape[0])
             best_lines = cached_lines
             k0_lines = cached_lines
-            # Keyword hits alone cannot confirm orientation: vertical-layout
-            # licenses (columns read top-to-bottom) hit every keyword while
-            # their scope text shatters into cross-column fragments. Only
-            # skip rotation when the lines are also predominantly horizontal.
+            # Keyword hits alone cannot confirm orientation: a sideways 横版
+            # phone photo still hits every label. Only skip rotation when
+            # the heading is on top and lines are mostly horizontal.
             mostly_horizontal = horiz >= len(cached_lines) * 0.5
-            rotations = range(1, 4) if (hits < 5 or not mostly_horizontal) else range(0)
+            title_ok = _title_sits_on_top(cached_lines, image.shape[0])
+            rotations = range(1, 4) if (hits < 5 or not mostly_horizontal or not title_ok) else range(0)
         else:
             rotations = range(4)
 
         for k in rotations:
+            LOG.info("[OCR] 方向 k=%d …", k)
             rotated = np.ascontiguousarray(np.rot90(image, k))
             lines = _run_ocr(self._ocr, rotated)
+            LOG.info("[OCR] 方向 k=%d → %d 行, 关键词 %d", k, len(lines), _keyword_hits(lines))
             if k == 0:
                 k0_lines = lines
             hits = _keyword_hits(lines)
             horiz = sum(1 for line in lines if (line.x1 - line.x0) > (line.y1 - line.y0) * 1.2)
             order = _order_score(lines)
-            score = (hits, horiz, order, len(lines))
+            score = _orientation_score(lines, rotated.shape[0])
             if score > best_score:
                 best_score = score
                 best_img = rotated
                 best_lines = lines
                 best_k = k
-            if hits >= 5 and horiz >= len(lines) * 0.5 and order >= 0:
+            if (hits >= 5 and horiz >= len(lines) * 0.5 and order >= 0
+                    and _title_sits_on_top(lines, rotated.shape[0])):
                 break
 
         # Handheld-shot zoom: re-OCR the paper at readable size, keeping the
@@ -820,6 +859,7 @@ class LicenseOCR:
                 best_lines = corrected_lines
         # Combined seal removal + CLAHE in one pass (saves one OCR pass)
         enhanced_clean = _enhance_and_clean(best_img)
+        LOG.info("[OCR] 去章增强再识别…")
         enhanced_clean_lines = _run_ocr(self._ocr, enhanced_clean)
         merged = _merge_lines(best_lines, enhanced_clean_lines)
         merged.sort(key=lambda line: (round(line.y0 / 18), line.x0))

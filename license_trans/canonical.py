@@ -99,9 +99,7 @@ class CanonicalChineseRecord:
                     })
             # Collect fields needing review
             record.needs_review = tracker.fields_needing_review()
-            record.ai_validated = any(
-                fs.ai_issues for fs in tracker.all_fields().values()
-            )
+            record.ai_validated = tracker.ai_round > 0 and not record.needs_review
 
         return record
 

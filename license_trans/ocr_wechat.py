@@ -10,14 +10,16 @@ and is not how WeChat 3.x/4.x OCR actually works.
 """
 from __future__ import annotations
 
+import errno
 import json
 import logging
 import os
+import queue
 import re
 import tempfile
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass
 from pathlib import Path
@@ -31,8 +33,116 @@ LOG = logging.getLogger("license_trans.ocr")
 _WXOCR_DLL = "wxocr.dll"
 _WXOCR_EXE_NAMES = ("WeChatOCR.exe", "WeChatOcr.exe")
 _VERSION_DIR_RE = re.compile(r"^\d+\.\d+")
-_WECHAT_LOCK = threading.RLock()
 _DEFAULT_TIMEOUT = 30.0
+_INIT_TIMEOUT = 30.0
+
+
+class _NativeThread:
+    """Keep wxocr.dll on one live thread for the process lifetime.
+
+    ``wcocr.init`` / ``wcocr.ocr`` are thread-affine. A throwaway
+    ThreadPoolExecutor for init, then another for ocr, lets the init
+    worker die — the next ``ocr()`` then raises ``wechatocr not initialized``.
+    """
+
+    def __init__(self) -> None:
+        self._jobs: queue.Queue = queue.Queue()
+        self.thread_ident: int | None = None
+        self._ready = threading.Event()
+        self._thread = threading.Thread(
+            target=self._loop, name="wechat-ocr-native", daemon=True)
+        self._thread.start()
+        self._ready.wait(timeout=5)
+
+    def _loop(self) -> None:
+        self.thread_ident = threading.get_ident()
+        self._ready.set()
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            fn, args, kwargs, fut = job
+            if not fut.set_running_or_notify_cancel():
+                continue
+            try:
+                fut.set_result(fn(*args, **kwargs))
+            except BaseException as exc:
+                fut.set_exception(exc)
+
+    def call(self, fn, *args, timeout: float | None = None, **kwargs):
+        if self.thread_ident is not None and threading.get_ident() == self.thread_ident:
+            return fn(*args, **kwargs)
+        fut: Future = Future()
+        self._jobs.put((fn, args, kwargs, fut))
+        try:
+            return fut.result(timeout=timeout)
+        except FuturesTimeout as exc:
+            raise WeChatOcrTimeout(
+                f"WeChat OCR timed out after {timeout}s"
+            ) from exc
+
+
+_NATIVE: _NativeThread | None = None
+_NATIVE_GUARD = threading.Lock()
+
+
+def _native() -> _NativeThread:
+    global _NATIVE
+    with _NATIVE_GUARD:
+        if _NATIVE is None:
+            _NATIVE = _NativeThread()
+        return _NATIVE
+
+
+_PENDING_TEMP: set[str] = set()
+_PENDING_GUARD = threading.Lock()
+
+
+def _is_sharing_violation(exc: OSError) -> bool:
+    if getattr(exc, "winerror", None) == 32:
+        return True
+    return exc.errno in (errno.EACCES, errno.EPERM, errno.EBUSY)
+
+
+def _unlink_temp(path: str, *, attempts: int = 8) -> None:
+    """Take the temp PNG back after wxocr.dll drops it, then delete.
+
+    The DLL often keeps a sharing lock for a short time after ocr() returns.
+    Forcing CloseHandle into WeChat is unsafe; retry on this process's native
+    thread until the file is ours again.
+    """
+    if not path:
+        return
+    delay = 0.03
+    last: OSError | None = None
+    for _ in range(max(1, attempts)):
+        try:
+            os.unlink(path)
+            with _PENDING_GUARD:
+                _PENDING_TEMP.discard(path)
+            return
+        except FileNotFoundError:
+            with _PENDING_GUARD:
+                _PENDING_TEMP.discard(path)
+            return
+        except OSError as exc:
+            last = exc
+            if not _is_sharing_violation(exc):
+                LOG.warning("temp OCR image cleanup failed: %s", exc)
+                return
+            time.sleep(delay)
+            delay = min(0.25, delay * 2)
+    with _PENDING_GUARD:
+        _PENDING_TEMP.add(path)
+    LOG.debug("temp OCR image still locked, deferred: %s (%s)", path, last)
+
+
+def _sweep_pending_temps() -> None:
+    with _PENDING_GUARD:
+        leftover = list(_PENDING_TEMP)
+        _PENDING_TEMP.clear()
+    for path in leftover:
+        _unlink_temp(path, attempts=3)
 
 _INSTALL_ROOTS = [
     Path(r"C:\Program Files\Tencent\Weixin"),
@@ -383,35 +493,59 @@ class WcocrBackend:
         self._initialized = False
         self._init_error: str | None = None
 
-    def init(self) -> bool:
-        with _WECHAT_LOCK:
-            if self._initialized:
-                return True
-            wcocr = _import_wcocr()
-            if wcocr is None:
-                self._init_error = (
-                    "wcocr/py-wechat-ocr not importable "
-                    "(install py-wechat-ocr==0.1.1 on Windows)"
-                )
-                return False
-            try:
-                wcocr.init(self.paths.ocr_binary, self.paths.runtime_dir)
-                self._wcocr = wcocr
-                self._initialized = True
-                LOG.info(
-                    "[OCR] wcocr init ok: binary=%s runtime=%s family=%s",
-                    self.paths.ocr_binary, self.paths.runtime_dir, self.paths.family,
-                )
-                return True
-            except Exception as exc:
-                LOG.exception("wcocr.init failed")
-                self._init_error = f"wcocr.init failed: {exc}"
-                return False
+    def init(self, timeout: float | None = None) -> bool:
+        return _native().call(self._init_on_native, timeout=timeout or _INIT_TIMEOUT)
 
-    def ocr_file(self, image_path: str) -> Any:
-        if not self._initialized or self._wcocr is None:
+    def _init_on_native(self) -> bool:
+        if self._initialized and self._wcocr is not None:
+            return True
+        wcocr = _import_wcocr()
+        if wcocr is None:
+            self._init_error = (
+                "wcocr/py-wechat-ocr not importable "
+                "(install py-wechat-ocr==0.1.1 on Windows)"
+            )
+            return False
+        try:
+            ok = wcocr.init(self.paths.ocr_binary, self.paths.runtime_dir)
+            if ok is False:
+                self._init_error = "wcocr.init returned False"
+                LOG.warning(
+                    "[OCR] wcocr.init returned False binary=%s runtime=%s",
+                    self.paths.ocr_binary, self.paths.runtime_dir,
+                )
+                return False
+            self._wcocr = wcocr
+            self._initialized = True
+            self._init_error = None
+            LOG.info(
+                "[OCR] wcocr init ok: binary=%s runtime=%s family=%s thread=%s",
+                self.paths.ocr_binary, self.paths.runtime_dir, self.paths.family,
+                threading.current_thread().name,
+            )
+            return True
+        except Exception as exc:
+            LOG.exception("wcocr.init failed")
+            self._init_error = f"wcocr.init failed: {exc}"
+            return False
+
+    def ocr_file(self, image_path: str, timeout: float | None = None) -> Any:
+        return _native().call(
+            self._ocr_on_native, image_path, timeout=timeout or _DEFAULT_TIMEOUT)
+
+    def _ocr_on_native(self, image_path: str) -> Any:
+        if not self._init_on_native() or self._wcocr is None:
             raise RuntimeError(self._init_error or "wcocr not initialized")
-        with _WECHAT_LOCK:
+        try:
+            return self._wcocr.ocr(image_path)
+        except Exception as exc:
+            if "not initialized" not in str(exc).lower():
+                raise
+            LOG.warning("[OCR] wcocr.ocr said not initialized — re-init on native thread")
+            self._initialized = False
+            self._wcocr = None
+            if not self._init_on_native() or self._wcocr is None:
+                raise RuntimeError(self._init_error or "wcocr not initialized") from exc
             return self._wcocr.ocr(image_path)
 
 
@@ -426,32 +560,39 @@ class PyWeChatOcrBackend:
         self._initialized = False
         self._init_error: str | None = None
 
-    def init(self) -> bool:
-        with _WECHAT_LOCK:
-            if self._initialized:
-                return True
-            try:
-                from wechat_ocr import WeChatOCR
-            except Exception as exc:
-                self._init_error = f"wechat_ocr.WeChatOCR import failed: {exc}"
-                return False
-            runtime = Path(self.paths.runtime_dir)
-            wx_dir = runtime.parent if _VERSION_DIR_RE.match(runtime.name) else runtime
-            try:
-                self._engine = WeChatOCR(str(wx_dir))
-                self._initialized = True
-                LOG.info("[OCR] py-wechat-ocr init ok: %s", wx_dir)
-                return True
-            except Exception as exc:
-                LOG.exception("WeChatOCR() init failed")
-                self._init_error = f"WeChatOCR init failed: {exc}"
-                return False
+    def init(self, timeout: float | None = None) -> bool:
+        return _native().call(self._init_on_native, timeout=timeout or _INIT_TIMEOUT)
 
-    def ocr_file(self, image_path: str) -> Any:
-        if not self._initialized or self._engine is None:
+    def _init_on_native(self) -> bool:
+        if self._initialized and self._engine is not None:
+            return True
+        try:
+            from wechat_ocr import WeChatOCR
+        except Exception as exc:
+            self._init_error = f"wechat_ocr.WeChatOCR import failed: {exc}"
+            return False
+        runtime = Path(self.paths.runtime_dir)
+        wx_dir = runtime.parent if _VERSION_DIR_RE.match(runtime.name) else runtime
+        try:
+            self._engine = WeChatOCR(str(wx_dir))
+            self._initialized = True
+            self._init_error = None
+            LOG.info("[OCR] py-wechat-ocr init ok: %s thread=%s",
+                     wx_dir, threading.current_thread().name)
+            return True
+        except Exception as exc:
+            LOG.exception("WeChatOCR() init failed")
+            self._init_error = f"WeChatOCR init failed: {exc}"
+            return False
+
+    def ocr_file(self, image_path: str, timeout: float | None = None) -> Any:
+        return _native().call(
+            self._ocr_on_native, image_path, timeout=timeout or _DEFAULT_TIMEOUT)
+
+    def _ocr_on_native(self, image_path: str) -> Any:
+        if not self._init_on_native() or self._engine is None:
             raise RuntimeError(self._init_error or "py-wechat-ocr not initialized")
-        with _WECHAT_LOCK:
-            return self._engine.ocr_img(image_path)
+        return self._engine.ocr_img(image_path)
 
 
 def _parse_wechat_payload(payload: Any) -> list[tuple]:
@@ -643,19 +784,10 @@ class WeChatOCREngine:
             PyWeChatOcrBackend(self._paths),
         ]
         errors: list[str] = []
-        init_timeout = min(8.0, self._timeout)
+        init_timeout = max(_INIT_TIMEOUT, self._timeout)
         for backend in backends:
             try:
-                executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wechat-init")
-                try:
-                    fut = executor.submit(backend.init)
-                    ok = fut.result(timeout=init_timeout)
-                except FuturesTimeout:
-                    LOG.exception("WeChat backend %s init timed out", backend.name)
-                    errors.append(f"{backend.name}: init timed out after {init_timeout}s")
-                    continue
-                finally:
-                    executor.shutdown(wait=False, cancel_futures=True)
+                ok = backend.init(timeout=init_timeout)
                 if ok:
                     self._backend = backend
                     self._initialized = True
@@ -663,6 +795,9 @@ class WeChatOCREngine:
                     return
                 if getattr(backend, "_init_error", None):
                     errors.append(str(backend._init_error))
+            except WeChatOcrTimeout:
+                LOG.exception("WeChat backend %s init timed out", backend.name)
+                errors.append(f"{backend.name}: init timed out after {init_timeout}s")
             except Exception as exc:
                 LOG.exception("WeChat backend %s failed", backend.name)
                 errors.append(f"{backend.name}: {exc}")
@@ -676,28 +811,22 @@ class WeChatOCREngine:
             tmp_path = tmp.name
         t0 = time.time()
         try:
+            _sweep_pending_temps()
             if not cv2.imwrite(tmp_path, image):
                 raise RuntimeError("failed to write temp image for WeChat OCR")
             payload = self._ocr_with_timeout(tmp_path)
             parsed = _parse_wechat_payload(payload)
-            return parsed, time.time() - t0
+            elapsed = time.time() - t0
+            if not parsed:
+                keys = list(payload.keys())[:12] if isinstance(payload, dict) else type(payload).__name__
+                LOG.warning("[OCR] WeChat parsed 0 boxes in %.2fs (%s)", elapsed, keys)
+            return parsed, elapsed
         finally:
             try:
-                os.unlink(tmp_path)
-            except OSError as exc:
-                LOG.warning("temp OCR image cleanup failed: %s", exc)
+                _native().call(_unlink_temp, tmp_path, timeout=8)
+            except Exception:
+                _unlink_temp(tmp_path)
 
     def _ocr_with_timeout(self, image_path: str) -> Any:
         assert self._backend is not None
-        executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wechat-ocr")
-        try:
-            fut = executor.submit(self._backend.ocr_file, image_path)
-            try:
-                return fut.result(timeout=self._timeout)
-            except FuturesTimeout as exc:
-                fut.cancel()
-                raise WeChatOcrTimeout(
-                    f"WeChat OCR timed out after {self._timeout}s"
-                ) from exc
-        finally:
-            executor.shutdown(wait=False, cancel_futures=True)
+        return self._backend.ocr_file(image_path, timeout=self._timeout)

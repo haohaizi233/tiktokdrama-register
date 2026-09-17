@@ -10,8 +10,11 @@ import cv2
 import numpy as np
 
 from .classify import NotFormatA, classify_format_a
-from .ocr import LicenseOCR, OcrLine, _run_ocr, _USCI_RE
-from .parse import parse_license
+from .ocr import (
+    LicenseOCR, OcrLine, _run_ocr, _USCI_RE, _enhance, _remove_red_seal,
+    _title_line,
+)
+from .parse import parse_license, DATE_RE
 from .render import render_pdf
 from .translate import translate_fields
 from .field_state import FieldState, FieldStatus, FieldStateTracker, CRITICAL_FIELDS
@@ -19,7 +22,7 @@ from .canonical import CanonicalChineseRecord
 from .ai_client import AIClient, is_ai_enabled
 from .ai_validator import LicenseSemanticValidator, TranslationValidator
 from .ocr_ensemble import OcrEnsemble, OcrCandidateFusion, FieldOcrCandidate
-from .field_crop import FieldCropper
+from .field_crop import FieldCropper, infer_scope_region
 from .ocr_service import OcrService
 from .rule_repair import apply_deterministic_repairs, field_passes_rules
 from .translation_resolver import TranslationResolver, leftover_cjk
@@ -274,48 +277,200 @@ def _extract_usci_from_qr(qr_data: str) -> str:
     return m.group(1) if m else ""
 
 
-def _recover_issue_date(image, lines, engine) -> str:
-    import re
+_ISSUE_DATE_RE = re.compile(
+    r"(20\d{2})\s*年\s*(1[0-2]|0[1-9]|[1-9])\s*月\s*(3[01]|[12]\d|0[1-9]|[1-9])\s*日?"
+)
 
-    year_ln = next((ln for ln in lines if re.fullmatch(r"20\d{2}年", ln.text.replace(" ", ""))), None)
-    day_ln = next((ln for ln in lines if re.match(r"月\s*\d{1,2}", ln.text.replace(" ", ""))), None)
-    if year_ln is None or day_ln is None:
-        blob = "".join(ln.text for ln in lines)
-        from .parse import DATE_RE
-        match = DATE_RE.search(blob)
-        return match.group(0) if match else ""
-    year = re.search(r"20\d{2}", year_ln.text).group(0)
-    day = re.search(r"(\d{1,2})", day_ln.text).group(1)
-    month = ""
+
+def _compact_issue_text(text: str) -> str:
+    return (text or "").replace(" ", "").replace("\u3000", "").replace("：", "").replace(":", "")
+
+
+def _issue_date_strip(image: np.ndarray, lines: list[OcrLine]) -> np.ndarray | None:
+    """Crop the date band under the registration-authority seal.
+
+    A-format prints 发证日期 under the red 登记机关 stamp, usually without a
+    label. Full-page OCR shatters it; this crop is the only region we re-OCR.
+    """
     h, w = image.shape[:2]
-    x0 = int(max(0, year_ln.x1 - 6))
-    x1 = int(min(w, day_ln.x0 + 8))
-    y0 = int(max(0, min(year_ln.y0, day_ln.y0) - 8))
-    y1 = int(min(h, max(year_ln.y1, day_ln.y1) + 8))
-    if x1 > x0 + 4:
-        gap = image[y0:y1, x0:x1]
-        if gap.size:
-            gap = cv2.resize(gap, None, fx=5.0, fy=5.0, interpolation=cv2.INTER_CUBIC)
-            gray = cv2.cvtColor(gap, cv2.COLOR_BGR2GRAY)
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            gap_bgr = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
-            for item in _run_ocr(engine._ocr, gap_bgr) + _run_ocr(engine._ocr, gap):
-                found = re.search(r"\b(1[0-2]|0?[1-9])\b", item.text)
-                if found:
-                    month = found.group(1)
-                    break
-    if not month:
-        for ln in lines:
-            if ln is year_ln or ln is day_ln:
-                continue
-            if abs(ln.cy - year_ln.cy) < 24 and year_ln.x1 - 8 <= ln.cx <= day_ln.x0 + 8:
-                found = re.search(r"(1[0-2]|0?[1-9])", ln.text)
-                if found:
-                    month = found.group(1)
-                    break
-    if not month:
+    if h < 20 or w < 20:
+        return None
+    issue_lbl = None
+    auth_lbl = None
+    for ln in lines:
+        t = _compact_issue_text(ln.text)
+        if issue_lbl is None and any(k in t for k in ("发证日期", "核准日期", "发照日期")):
+            issue_lbl = ln
+        if auth_lbl is None and "登记机关" in t:
+            auth_lbl = ln
+    if issue_lbl is not None:
+        lh = max(14.0, issue_lbl.y1 - issue_lbl.y0)
+        x0 = int(max(0, issue_lbl.x0 - lh * 0.4))
+        x1 = int(min(w, max(issue_lbl.x1 + lh * 14, w * 0.98)))
+        y0 = int(max(0, issue_lbl.y0 - lh * 0.6))
+        y1 = int(min(h, issue_lbl.y1 + lh * 4.0))
+    elif auth_lbl is not None:
+        lh = max(14.0, auth_lbl.y1 - auth_lbl.y0)
+        x0 = int(min(max(w * 0.48, auth_lbl.x1), w * 0.62))
+        x1 = w
+        y0 = int(max(0, auth_lbl.y0 - lh * 0.3))
+        y1 = int(min(h, max(auth_lbl.y1 + lh * 7.5, h * 0.98)))
+    else:
+        x0, y0, x1, y1 = int(w * 0.50), int(h * 0.70), w, h
+    if x1 - x0 < 24 or y1 - y0 < 12:
+        return None
+    return image[y0:y1, x0:x1].copy()
+
+
+def _issue_date_views(strip: np.ndarray) -> list[np.ndarray]:
+    destained = _remove_red_seal(strip)
+    h, w = destained.shape[:2]
+    scale = 4.0 if max(h, w) < 420 else 2.5
+    big = cv2.resize(destained, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
+    _, otsu = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    if float(np.mean(otsu)) < 127:
+        otsu = 255 - otsu
+    return [
+        cv2.cvtColor(otsu, cv2.COLOR_GRAY2BGR),
+        big,
+        destained,
+        _enhance(destained),
+    ]
+
+
+def _stitch_issue_date_tokens(lines: list[OcrLine]) -> str:
+    """Assemble YYYY年MM月DD日 from left-to-right date-strip tokens."""
+    if not lines:
         return ""
-    return f"{int(year):04d}年{int(month):02d}月{int(day):02d}日"
+    ordered = sorted(lines, key=lambda ln: (round(ln.y0 / 18.0), ln.x0))
+    blob = _compact_issue_text("".join(ln.text for ln in ordered)).replace("曰", "日")
+    match = _ISSUE_DATE_RE.search(blob)
+    if match:
+        year, month, day = int(match.group(1)), int(match.group(2)), int(match.group(3))
+        if 1 <= month <= 12 and 1 <= day <= 31:
+            return f"{year:04d}年{month:02d}月{day:02d}日"
+    year = month = day = None
+    for ln in ordered:
+        token = _compact_issue_text(ln.text).replace("曰", "日")
+        if year is None:
+            found = re.search(r"(20\d{2})", token)
+            if not found:
+                continue
+            year = int(found.group(1))
+            found_m = re.search(r"年(1[0-2]|0[1-9]|[1-9])", token)
+            if found_m:
+                month = int(found_m.group(1))
+            found_d = re.search(r"月(3[01]|[12]\d|0[1-9]|[1-9])", token)
+            if found_d:
+                day = int(found_d.group(1))
+            continue
+        if month is None:
+            found_m = re.search(r"(?:年|^)(1[0-2]|0[1-9]|[1-9])(?:月)?$", token)
+            if found_m:
+                month = int(found_m.group(1))
+                continue
+        if month is not None and day is None:
+            found_d = re.search(r"(?:月|^)(3[01]|[12]\d|0[1-9]|[1-9])(?:日)?$", token)
+            if found_d:
+                day = int(found_d.group(1))
+    if year and month and day:
+        return f"{year:04d}年{month:02d}月{day:02d}日"
+    return ""
+
+
+def _recover_issue_date(image, lines, engine) -> str:
+    """Dedicated path: crop date strip → destain → OCR digits → stitch.
+
+    Does not scan the whole page for the first date (that is 成立日期).
+    """
+    if image is None or engine is None:
+        return ""
+    strip = _issue_date_strip(image, lines or [])
+    if strip is None or strip.size == 0:
+        return ""
+    ocr_fn = getattr(engine, "_ocr", engine)
+    seen: list[OcrLine] = []
+    for view in _issue_date_views(strip):
+        try:
+            seen.extend(_run_ocr(ocr_fn, view))
+        except Exception:
+            LOG.debug("发证日期条 OCR 失败", exc_info=True)
+            continue
+        issue = _stitch_issue_date_tokens(seen)
+        if issue:
+            LOG.info("发证日期（去章条）%s", issue)
+            return issue
+    issue = _stitch_issue_date_tokens(seen)
+    if issue:
+        LOG.info("发证日期（去章条）%s", issue)
+    return issue
+
+
+def _scope_views(strip: np.ndarray) -> list[np.ndarray]:
+    destained = _remove_red_seal(strip)
+    enhanced = _enhance(destained)
+    views: list[np.ndarray] = []
+    for src in (strip, destained, enhanced):
+        h, w = src.shape[:2]
+        if h < 8 or w < 8:
+            continue
+        scale = 4.0 if max(h, w) < 700 else 2.5
+        views.append(cv2.resize(src, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC))
+    return views
+
+
+def _recover_scope(image, lines: list[OcrLine], engine) -> tuple[str, list[OcrLine]]:
+    """Crop the left-column 经营范围 band and re-OCR at high magnification.
+
+    Full-page WeChat often skips this dense paragraph (Hengfeng: only the
+    footer '制的项目)' survived). A tight crop + 2.5–4× upsample recovers it.
+    """
+    if image is None or engine is None:
+        return "", []
+    region = infer_scope_region(image, lines or [])
+    if region is None:
+        return "", []
+    x0, y0, x1, y1 = region
+    strip = image[y0:y1, x0:x1]
+    if strip is None or strip.size == 0:
+        return "", []
+    LOG.info("[OCR] 经营范围条 %dx%d @ (%d,%d)-(%d,%d)", strip.shape[1], strip.shape[0], x0, y0, x1, y1)
+    ocr_fn = getattr(engine, "_ocr", engine)
+    best_text = ""
+    best_lines: list[OcrLine] = []
+    from .parse import clip_scope_text
+    from .field_parse import parse_field_lines
+    for view in _scope_views(strip):
+        try:
+            found = _run_ocr(ocr_fn, view)
+        except Exception:
+            LOG.debug("经营范围条 OCR 失败", exc_info=True)
+            continue
+        joined = parse_field_lines("scope", found) or "".join(ln.text for ln in found)
+        clipped = clip_scope_text(joined) or joined
+        LOG.info("[OCR] 经营范围条 %d 行: %s", len(found), (clipped or "")[:80])
+        score = (
+            ("许可项目" in clipped) + ("一般项目" in clipped) + ("分包" in clipped)
+            + ("租赁" in clipped) + ("项目" in clipped),
+            len(clipped),
+        )
+        prev = (
+            ("许可项目" in best_text) + ("一般项目" in best_text) + ("分包" in best_text)
+            + ("租赁" in best_text) + ("项目" in best_text),
+            len(best_text),
+        )
+        if clipped and score > prev:
+            best_text, best_lines = clipped, found
+            if "许可项目" in best_text and "一般项目" in best_text:
+                break
+    if best_text and field_passes_rules("scope", _sanitize_scope(best_text)):
+        best_text = _sanitize_scope(best_text)
+        LOG.info("经营范围（裁条）%s", best_text[:60])
+        return best_text, best_lines
+    if best_text:
+        LOG.info("经营范围条未过规则: %s", best_text[:60])
+    return "", []
 
 
 def detect_license(lines: list[OcrLine]) -> bool:
@@ -347,17 +502,25 @@ def _scope_broken(scope: str) -> bool:
     License scope text never nests parentheses; a second open paren while
     one is still open (…食用农产品（不（依法须…) means an OCR row went
     missing between two wrapped rows and the join glued the fragments.
+
+    A single unclosed paren on the legal footer (依法须经批准…) is just a
+    truncated last line — not a reason to rerun full-page OCR at 3200px.
     """
     if not scope:
         return False
     depth = 0
+    nested = False
     for ch in scope:
         if ch in "（(":
             depth += 1
             if depth > 1:
-                return True
+                nested = True
         elif ch in "）)":
             depth -= 1
+    if nested:
+        return True
+    if depth == 1 and "依法须经批准" in scope:
+        return False
     return depth != 0
 
 
@@ -367,6 +530,61 @@ _ANCHOR_PAT = re.compile(
     r"gsxt|监督管理总局|信用信息公示系统"
 )
 _DATE_PAT = re.compile(r"20\d{2}\s*年")
+
+
+def _rot90_line(ln: OcrLine, k: int, width: int, height: int) -> OcrLine:
+    """Map a box through the same np.rot90(k) applied to the image."""
+    k %= 4
+    pts = [(ln.x0, ln.y0), (ln.x1, ln.y0), (ln.x1, ln.y1), (ln.x0, ln.y1)]
+    mapped: list[tuple[float, float]] = []
+    for x, y in pts:
+        nx, ny = x, y
+        cw, ch = width, height
+        for _ in range(k):
+            nx, ny = ny, cw - 1 - nx
+            cw, ch = ch, cw
+        mapped.append((nx, ny))
+    xs = [p[0] for p in mapped]
+    ys = [p[1] for p in mapped]
+    return OcrLine(ln.text, ln.score, min(xs), min(ys), max(xs), max(ys))
+
+
+def _upright_rotations(image: np.ndarray, lines: list[OcrLine]) -> int:
+    """How many np.rot90 steps put 营业执照 on top (reading-upright)."""
+    h, w = image.shape[:2]
+    title = _title_line(lines)
+    if title is None:
+        if h > w * 1.12 and lines:
+            tall = sum(1 for ln in lines if (ln.y1 - ln.y0) > (ln.x1 - ln.x0) * 1.2)
+            if tall >= len(lines) * 0.45:
+                return 1
+        return 0
+    tw, th = title.x1 - title.x0, title.y1 - title.y0
+    dist_top, dist_bottom = title.cy, h - title.cy
+    dist_left, dist_right = title.cx, w - title.cx
+    if th > tw * 1.15:
+        return 1 if dist_right <= dist_left else 3
+    nearest = min(dist_top, dist_bottom, dist_left, dist_right)
+    if nearest == dist_top:
+        return 0
+    if nearest == dist_bottom:
+        return 2
+    if nearest == dist_right:
+        return 1
+    return 3
+
+
+def _make_upright(image: np.ndarray, lines: list[OcrLine]) -> tuple[np.ndarray, list[OcrLine]]:
+    """Rotate the photo so the license heading is on top."""
+    k = _upright_rotations(image, lines)
+    if k % 4 == 0:
+        return image, lines
+    h, w = image.shape[:2]
+    rotated = np.ascontiguousarray(np.rot90(image, k))
+    rotated_lines = [_rot90_line(ln, k, w, h) for ln in lines]
+    LOG.info("[PDF] 原件页转正 k=%d (%dx%d → %dx%d)",
+             k, w, h, rotated.shape[1], rotated.shape[0])
+    return rotated, rotated_lines
 
 
 def _crop_license_view(image: np.ndarray, lines: list[OcrLine]) -> np.ndarray:
@@ -391,7 +609,7 @@ def _crop_license_view(image: np.ndarray, lines: list[OcrLine]) -> np.ndarray:
     y1 = max(a.y1 for a in anchors)
     if (x1 - x0) < w * 0.15 or (y1 - y0) < h * 0.15:
         return image
-    m = 0.08 * min(x1 - x0, y1 - y0)
+    m = 0.12 * max(x1 - x0, y1 - y0)
     cx0, cy0 = max(0, int(x0 - m)), max(0, int(y0 - m))
     cx1, cy1 = min(w, int(x1 + m)), min(h, int(y1 + m))
     if (cx1 - cx0) >= w * 0.995 and (cy1 - cy0) >= h * 0.995:
@@ -401,16 +619,14 @@ def _crop_license_view(image: np.ndarray, lines: list[OcrLine]) -> np.ndarray:
 
 def _display_view(image: np.ndarray, lines: list[OcrLine],
                   meta: dict | None) -> np.ndarray:
-    """Build the original-image page: cropped to the paper and upright.
+    """Original-image PDF page: paper crop in reading-upright orientation.
 
-    OCR may rotate a portrait vertical-text license (竖版执照) 90° to read
-    its columns as rows; for display the document is turned back to its
-    natural orientation. Landscape licenses pass through unchanged.
+    Do not embed the camera file. A phone-portrait shot of a 横版 license
+    must be rotated so 营业执照 sits on top, then cropped to the paper.
     """
-    view = _crop_license_view(image, lines)
-    if meta and meta.get("vertical_native") and meta.get("rotation") in (1, 3):
-        view = np.ascontiguousarray(np.rot90(view, 4 - meta["rotation"]))
-    return view
+    _ = meta
+    upright, ulines = _make_upright(image, lines)
+    return _crop_license_view(upright, ulines)
 
 
 def _missing_critical(fields) -> list[str]:
@@ -455,9 +671,10 @@ def _run_ai_validation_and_retry(
     engine,
     trace: PipelineTrace | None = None,
 ) -> FieldStateTracker:
-    """Rule repair → AI flag → field OCR retry → second validation.
+    """Rule repair → AI flag → field OCR retry → OCR/AI fill leftover dates.
 
-    AI never writes Chinese facts. Retry failures become NEED_REVIEW.
+    Crop retry is skipped when the current value already passes rules.
+    Leftover review flags are cleared so conversion ships without a human pass.
     """
     tracker = _build_tracker(fields)
     apply_deterministic_repairs(fields, tracker)
@@ -470,7 +687,17 @@ def _run_ai_validation_and_retry(
     raw_texts = [ln.text for ln in lines]
 
     if not ai_client.is_available():
-        tracker.finalize_retries()
+        _harvest_from_ocr(fields, tracker, raw_texts, lines)
+        if not field_passes_rules("scope", getattr(fields, "scope", "") or "") or _scope_looks_like_name(fields):
+            recovered, _extra = _recover_scope(oriented, lines, engine)
+            if recovered:
+                _adopt_fill(fields, tracker, "scope", recovered, "scope_strip", "经营范围条")
+        _fallback_issue_from_established(fields, tracker)
+        for fs in tracker.all_fields().values():
+            if fs.status in (FieldStatus.RETRY_OCR, FieldStatus.SUSPECTED_OCR_ERROR,
+                             FieldStatus.NEED_REVIEW, FieldStatus.AMBIGUOUS,
+                             FieldStatus.LOW_CONFIDENCE):
+                fs.status = FieldStatus.OK
         return tracker
 
     for round_i in range(MAX_AI_VALIDATION_ROUND):
@@ -485,7 +712,9 @@ def _run_ai_validation_and_retry(
                 issues=len(result.get("issues") or []),
             )
         retry_fields = validator.apply_to_tracker(result, tracker)
-        retry_fields = [f for f in retry_fields if tracker.can_retry(f)]
+        retry_fields = list(dict.fromkeys(
+            f for f in retry_fields
+            if tracker.can_retry(f) and _worth_field_retry(f, fields)))
         if not retry_fields:
             break
         LOG.info("[AI] 需要重新 OCR 的字段: %s", retry_fields)
@@ -493,15 +722,344 @@ def _run_ai_validation_and_retry(
             retry_fields, fields, lines, oriented, engine, tracker, trace)
         for name in retry_fields:
             if name not in resolved:
-                tracker.mark_need_review(name, "retry_failed")
+                current = getattr(fields, name, "") or ""
+                if current.strip():
+                    LOG.info("[OCR] %s 重试无更好结果, 保留现有值", name)
+                    fs = tracker.get(name)
+                    if fs:
+                        fs.status = FieldStatus.OK
+                else:
+                    tracker.mark_need_review(name, "retry_failed")
             elif tracker.get(name) and tracker.get(name).status == FieldStatus.RETRY_OCR:
                 tracker.get(name).status = FieldStatus.OK
         parsed_dict = fields.to_dict()
         if not resolved:
             break
 
-    tracker.finalize_retries()
+    _harvest_from_ocr(fields, tracker, raw_texts, lines)
+    if not field_passes_rules("scope", getattr(fields, "scope", "") or "") or _scope_looks_like_name(fields):
+        recovered, _extra = _recover_scope(oriented, lines, engine)
+        if recovered:
+            _adopt_fill(fields, tracker, "scope", recovered, "scope_strip", "经营范围条")
+    _ai_fill_from_ocr(fields, tracker, raw_texts, ai_client)
+    _fallback_issue_from_established(fields, tracker)
+    for fs in tracker.all_fields().values():
+        if fs.status in (FieldStatus.RETRY_OCR, FieldStatus.SUSPECTED_OCR_ERROR,
+                         FieldStatus.NEED_REVIEW, FieldStatus.AMBIGUOUS,
+                         FieldStatus.LOW_CONFIDENCE):
+            fs.status = FieldStatus.OK
     return tracker
+
+
+_AI_FILL_FIELDS = ("established", "term", "issue_date", "authority", "scope")
+
+
+def _scope_looks_like_name(fields) -> bool:
+    scope = re.sub(r"\s+", "", getattr(fields, "scope", "") or "")
+    name = re.sub(r"\s+", "", getattr(fields, "name", "") or "")
+    if not scope or not name:
+        return False
+    return scope == name or name in scope or scope in name
+
+
+def _worth_field_retry(name: str, fields) -> bool:
+    """Skip crop retry when the current value already looks valid.
+
+    Field crops often grab the whole license (scope) or a street number
+    (authority). A checksum-valid USCI / 局-bearing authority should stand.
+    """
+    val = getattr(fields, name, "") or ""
+    if name == "scope" and _scope_looks_like_name(fields):
+        return False
+    return not field_passes_rules(name, val)
+
+
+def _grounded_in_ocr(value: str, blob: str) -> bool:
+    compact_val = re.sub(r"\s+", "", value or "")
+    compact_blob = re.sub(r"\s+", "", blob or "")
+    if not compact_val:
+        return False
+    if compact_val in compact_blob:
+        return True
+    if DATE_RE.search(compact_val):
+        digits = re.findall(r"\d+", compact_val)
+        return bool(digits) and all(d in compact_blob for d in digits)
+    chars = [c for c in compact_val if "\u4e00" <= c <= "\u9fff"]
+    if len(chars) >= 4:
+        hit = sum(1 for c in chars if c in compact_blob)
+        return hit / len(chars) >= 0.35
+    digits = re.findall(r"\d+", compact_val)
+    return bool(digits) and all(d in compact_blob for d in digits)
+
+
+def _adopt_fill(fields, tracker: FieldStateTracker, name: str, val: str,
+                source: str, reason: str) -> bool:
+    val = (val or "").strip()
+    if name == "scope":
+        val = _sanitize_scope(val)
+    if not val or not field_passes_rules(name, val):
+        return False
+    old = getattr(fields, name, "") or ""
+    if (old == val and field_passes_rules(name, old)
+            and not (name == "scope" and _scope_looks_like_name(fields))):
+        fs = tracker.get(name)
+        if fs:
+            fs.status = FieldStatus.OK
+        return True
+    setattr(fields, name, val)
+    fs = tracker.get(name)
+    if fs:
+        if old != val:
+            fs.add_repair(old, val, source, reason=reason)
+        fs.value = val
+        fs.status = FieldStatus.OK
+    return True
+
+
+def _sanitize_scope(val: str) -> str:
+    from .parse import clip_scope_text
+
+    t = clip_scope_text(val or "")
+    t = t.replace("许可具", "许可项").replace("般项日", "般项目")
+    for stop in ("法定代表人", "注册资本", "成立日期", "营业期限", "登记机关"):
+        i = t.find(stop)
+        if i >= 8:
+            t = t[:i]
+    return t.strip(" :：;；,，、")
+
+
+def _fallback_issue_from_established(fields, tracker: FieldStateTracker | None = None) -> None:
+    """If the seal date cannot be read, copy 成立日期 (or the term start)."""
+    if field_passes_rules("issue_date", getattr(fields, "issue_date", "") or ""):
+        return
+    src = getattr(fields, "established", "") or ""
+    if not DATE_RE.search(src or ""):
+        m = DATE_RE.search(getattr(fields, "term", "") or "")
+        if m:
+            src = f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日"
+    if not DATE_RE.search(src or ""):
+        LOG.warning("发证日期未识别，可在面板里指定")
+        return
+    m = DATE_RE.search(src)
+    src = f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日"
+    old = getattr(fields, "issue_date", "") or ""
+    fields.issue_date = src
+    LOG.info("发证日期未识别, 使用成立/期限日期 %s", src)
+    if tracker is not None:
+        fs = tracker.get("issue_date")
+        if fs is None:
+            fs = tracker.init_field("issue_date", old)
+        if old != src:
+            fs.add_repair(old, src, "established_fallback", reason="seal date missing")
+        fs.value = src
+        fs.status = FieldStatus.OK
+    if "issue_date" in getattr(fields, "warnings", []):
+        fields.warnings.remove("issue_date")
+
+
+def _scope_from_ocr_lines(lines: list[OcrLine] | None) -> str:
+    """Collect 经营范围 from lines to the right/below the label (left column)."""
+    if not lines:
+        return ""
+    key = None
+    for ln in lines:
+        t = re.sub(r"\s+", "", ln.text or "")
+        if t.startswith("经营范围") or t.startswith("营范围") or t.startswith("经 营 范 围"):
+            key = ln
+            break
+        if "经营范围" in t[:10]:
+            key = ln
+            break
+    if key is None:
+        return ""
+    page_w = max((ln.x1 for ln in lines), default=key.x1) or 1
+    left_cut = page_w * 0.62
+    parts: list[str] = []
+    inline = re.sub(r"^经营范围[:：]?", "", re.sub(r"\s+", "", key.text or ""))
+    inline = re.sub(r"^营范围[:：]?", "", inline)
+    if inline and inline not in ("经营范围", "营范围"):
+        parts.append(inline)
+    stops = ("注册资本", "成立日期", "营业期限", "登记机关", "法定代表人", "名称", "类型")
+    for ln in lines:
+        if ln is key:
+            continue
+        t = re.sub(r"\s+", "", ln.text or "")
+        if not t:
+            continue
+        if any(t == s or t.startswith(s) for s in stops) and len(t) < 12:
+            continue
+        if ln.x0 > left_cut:
+            continue
+        if ln.y1 < key.y0 - 8:
+            continue
+        if ln.x1 < key.x0 - 40:
+            continue
+        parts.append(t)
+    return _sanitize_scope("".join(parts))
+
+
+def _harvest_scope_text(compact: str) -> str:
+    from .parse import clip_scope_text
+
+    compact = (compact or "").replace("许可具", "许可项").replace("般项日", "般项目")
+    clipped = clip_scope_text(compact)
+    if clipped and ("许可项目" in clipped or "一般项目" in clipped or "许可项" in clipped) and len(clipped) >= 8:
+        return _sanitize_scope(clipped)
+    m = re.search(
+        r"(?:经营范围|许可项目|许可项|一般项目|般项目)[:：]?(.*?)(?:注册资本|成立日期|营业期限|登记机关|$)",
+        compact,
+    )
+    if not m:
+        return ""
+    body = re.split(r"住所|住\s*所", m.group(1))[0]
+    if len(body) < 8:
+        return ""
+    clipped = clip_scope_text("许可项目" + body) or body
+    return _sanitize_scope(clipped)
+
+
+def _infer_authority_from_place(address: str, name: str = "") -> str:
+    """A-format 登记机关 is usually '{县/区/市}市场监督管理局' under the seal.
+
+    WeChat often returns only 'D登记机关'. Use the most specific place in
+    住所/名称 (县 before 区 before 市).
+    """
+    src = re.sub(r"\s+", "", (address or "") + (name or ""))
+    if not src:
+        return ""
+    for pat in (
+        r"(?:省|市|^)([\u4e00-\u9fff]{2,8}自治县)",
+        r"(?:省|市|^)([\u4e00-\u9fff]{2,3}县)",
+        r"(?:市|^)([\u4e00-\u9fff]{2,4}区)",
+        r"(?:省|^)([\u4e00-\u9fff]{2,4}市)",
+    ):
+        hits = re.findall(pat, src)
+        hits = [h for h in hits if not any(ch in h[:-1] for ch in "省市州")]
+        if hits:
+            place = hits[-1]
+            if len(place) >= 3:
+                return place + "市场监督管理局"
+    return ""
+
+
+def _harvest_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
+                      lines: list[OcrLine] | None = None) -> None:
+    """Copy dates/term/authority/scope out of OCR lines when parse left holes."""
+    compact = re.sub(r"\s+", "", "".join(raw_texts or []))
+    blob = "".join(raw_texts or [])
+    if not compact:
+        return
+
+    def _date(m: re.Match) -> str:
+        return f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日"
+
+    if not field_passes_rules("established", getattr(fields, "established", "") or ""):
+        m = re.search(r"成立日期" + DATE_RE.pattern, compact)
+        if m and _grounded_in_ocr(_date(m), blob):
+            _adopt_fill(fields, tracker, "established", _date(m), "ocr_harvest", "成立日期")
+
+    if not field_passes_rules("term", getattr(fields, "term", "") or ""):
+        term = ""
+        m = re.search(
+            r"(?:营业期限|经营期限|业期限)?" + DATE_RE.pattern + r"至长期",
+            compact,
+        )
+        if m:
+            term = f"{_date(m)}至长期"
+        elif "长期" in compact:
+            m = DATE_RE.search(getattr(fields, "term", "") or "") or re.search(
+                r"(?:营业期限|经营期限|业期限)" + DATE_RE.pattern, compact)
+            if m:
+                term = f"{_date(m)}至长期"
+        if term and _grounded_in_ocr(term, blob):
+            _adopt_fill(fields, tracker, "term", term, "ocr_harvest", "营业期限")
+
+    if not field_passes_rules("issue_date", getattr(fields, "issue_date", "") or ""):
+        m = re.search(r"(?:发证日期|核准日期)" + DATE_RE.pattern, compact)
+        if m and _grounded_in_ocr(_date(m), blob):
+            _adopt_fill(fields, tracker, "issue_date", _date(m), "ocr_harvest", "发证日期")
+
+    if not field_passes_rules("authority", getattr(fields, "authority", "") or ""):
+        m = re.search(r"(?:登记机关|发照机关)([\u4e00-\u9fff]{4,18}局)", compact)
+        if not m:
+            m = re.search(
+                r"([\u4e00-\u9fff]{2,8}(?:市场监督|工商行政|行政审批)管理局)",
+                compact,
+            )
+        if m and _grounded_in_ocr(m.group(1), blob):
+            _adopt_fill(fields, tracker, "authority", m.group(1), "ocr_harvest", "登记机关")
+        else:
+            inferred = _infer_authority_from_place(
+                getattr(fields, "address", "") or "",
+                getattr(fields, "name", "") or "",
+            )
+            if inferred:
+                _adopt_fill(fields, tracker, "authority", inferred, "place_infer", "住所推断登记机关")
+
+    candidates = [_scope_from_ocr_lines(lines), _harvest_scope_text(compact)]
+    scope_txt = max((c for c in candidates if c), key=len, default="")
+    if scope_txt and (
+        _scope_looks_like_name(fields)
+        or not field_passes_rules("scope", getattr(fields, "scope", "") or "")
+        or len(scope_txt) > len(re.sub(r"\s+", "", getattr(fields, "scope", "") or "")) + 8
+    ):
+        _adopt_fill(fields, tracker, "scope", scope_txt, "ocr_harvest", "经营范围")
+
+
+def _fields_needing_ai_fill(fields) -> list[str]:
+    needed = []
+    for name in _AI_FILL_FIELDS:
+        val = getattr(fields, name, "") or ""
+        if name == "scope" and _scope_looks_like_name(fields):
+            needed.append(name)
+        elif not field_passes_rules(name, val):
+            needed.append(name)
+    return needed
+
+
+def _ai_fill_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
+                      ai_client) -> None:
+    """Let AI copy missing dates/term/authority/scope from OCR text. No invention."""
+    needed = _fields_needing_ai_fill(fields)
+    if not needed or not getattr(ai_client, "is_available", lambda: False)():
+        return
+    blob = "".join(raw_texts)
+    LOG.info("[AI] 从 OCR 补全字段: %s", ", ".join(needed))
+    prompt = (
+        "From the OCR lines of a Chinese business license, copy these fields "
+        "if they are present. Return JSON only: {\"fields\": {\"established\": "
+        "\"YYYY年MM月DD日\", \"term\": \"...至长期\", \"issue_date\": "
+        "\"YYYY年MM月DD日\", \"authority\": \"...局\", \"scope\": \"经营范围正文\"}}. "
+        "Copy existing OCR text; do not invent. Omit keys you cannot find. "
+        "authority must contain 局. scope is business items, not the company name."
+    )
+    user = json.dumps({"need": needed, "parsed": {
+        n: getattr(fields, n, "") for n in _AI_FILL_FIELDS
+    }, "ocr": raw_texts[:40]}, ensure_ascii=False)
+    try:
+        result = ai_client.chat_json(prompt, user, temperature=0.0, max_tokens=800)
+    except Exception:
+        LOG.exception("[AI] 字段补全失败")
+        return
+    filled = (result or {}).get("fields") if isinstance(result, dict) else None
+    if not isinstance(filled, dict):
+        return
+    for name in needed:
+        val = str(filled.get(name) or "").strip()
+        if not val:
+            continue
+        if name == "scope":
+            val = _sanitize_scope(val)
+        grounded = _grounded_in_ocr(val, blob)
+        if not grounded and name == "scope":
+            biz = any(k in val for k in ("许可", "一般项目", "分包", "租赁", "销售", "服务"))
+            name_zh = getattr(fields, "name", "") or ""
+            grounded = biz and val != name_zh and name_zh not in val
+        if not grounded:
+            LOG.info("[AI] 丢弃未在 OCR 中出现的 %s: %s", name, val[:40])
+            continue
+        if _adopt_fill(fields, tracker, name, val, "ai_extract", "copied from OCR"):
+            LOG.info("[AI] %s 补全: %s", name, val[:40])
 
 
 def _retry_one_field(
@@ -532,6 +1090,12 @@ def _retry_one_field(
     if not candidates:
         LOG.info("[OCR] %s 无候选结果", field_name)
         return False
+    old_val = (fs.value or "").strip()
+    if old_val:
+        candidates.append(FieldOcrCandidate(
+            field=field_name, engine="parsed", variant="original",
+            text=old_val, score=0.99,
+        ))
     fused = fusion.fuse_field_ex(field_name, candidates)
     if trace:
         trace.emit(
@@ -553,15 +1117,21 @@ def _retry_one_field(
         LOG.info("[OCR] %s 候选未通过规则: %s", field_name, new_val[:40])
         return False
     old_val = fs.value
-    if new_val != old_val:
-        fs.add_repair(
-            old_val, new_val, "ocr_fusion",
-            confidence=best.score if best.score is not None else 0.0,
-            reason=f"Field-level re-OCR via {best.engine}/{best.variant}",
-        )
-        setattr(fields, field_name, new_val)
-        LOG.info("[OCR] %s 修复: '%s' → '%s' (via %s)",
-                 field_name, old_val[:30], new_val[:30], best.engine)
+    if new_val == old_val:
+        fs.status = FieldStatus.OK
+        return True
+    if best.engine == "parsed":
+        LOG.info("[OCR] %s 保留解析结果, 字段裁剪未改善", field_name)
+        fs.status = FieldStatus.OK
+        return True
+    fs.add_repair(
+        old_val, new_val, "ocr_fusion",
+        confidence=best.score if best.score is not None else 0.0,
+        reason=f"Field-level re-OCR via {best.engine}/{best.variant}",
+    )
+    setattr(fields, field_name, new_val)
+    LOG.info("[OCR] %s 修复: '%s' → '%s' (via %s)",
+             field_name, old_val[:30], new_val[:30], best.engine)
     fs.status = FieldStatus.OK
     return True
 
@@ -681,6 +1251,7 @@ def convert_image(
     trace = trace or PipelineTrace()
     LOG.info("[%s] 读取 %s", trace.trace_id, image_path.name)
     meta: dict = {}
+    blob = ""
     if fields_override is not None:
         from .ocr import _read_image
         from .parse import LicenseFields
@@ -722,25 +1293,26 @@ def convert_image(
                 if not missing and not broken:
                     break
 
-        classify_format_a(fields, blob)
-        issue = _recover_issue_date(oriented, lines, engine)
         if issue_date:
             fields.issue_date = _normalize_issue_date(issue_date)
             if "issue_date" in fields.warnings:
                 fields.warnings.remove("issue_date")
             LOG.info("发证日期（指定）%s", fields.issue_date)
-        elif issue:
-            fields.issue_date = issue
-            if "issue_date" in fields.warnings:
-                fields.warnings.remove("issue_date")
-            LOG.info("发证日期（识别）%s", fields.issue_date)
-        elif not fields.issue_date:
-            from .parse import refine_issue_date
-            refine_issue_date(fields, blob)
-            if fields.issue_date:
-                LOG.info("发证日期（碎片拼接）%s", fields.issue_date)
-            else:
-                LOG.warning("发证日期未识别，可在面板里指定")
+        else:
+            issue = _recover_issue_date(oriented, lines, engine)
+            if issue:
+                fields.issue_date = issue
+                if "issue_date" in fields.warnings:
+                    fields.warnings.remove("issue_date")
+            if not field_passes_rules("issue_date", fields.issue_date or ""):
+                _fallback_issue_from_established(fields)
+
+        if not field_passes_rules("scope", fields.scope or "") or _scope_looks_like_name(fields):
+            recovered, _extra = _recover_scope(oriented, lines, engine)
+            if recovered:
+                fields.scope = recovered
+                if "scope" in fields.warnings:
+                    fields.warnings.remove("scope")
 
         if hasattr(engine, "last_meta") and engine.last_meta:
             meta.update(engine.last_meta)
@@ -770,6 +1342,7 @@ def convert_image(
     qr_data = _decode_qr(qr_src)
     qr_usci = _extract_usci_from_qr(qr_data)
     _apply_qr_usci(fields, qr_usci, qr_data, trace)
+    classify_format_a(fields, blob)
 
     # --- Rule + AI validation + field retry (mutates fields, then freeze) ---
     if fields_override is not None:

@@ -18,7 +18,12 @@ LOG = logging.getLogger("license_trans.ocr")
 
 
 class DualOcrEngine:
-    """Inner engine used by LicenseOCR: WeChat first, PP-OCRv6 on any failure."""
+    """Inner engine used by LicenseOCR: WeChat first, PP-OCRv6 only if loaded.
+
+    When PP-OCR is not loaded, WeChat empty results stay empty so LicenseOCR
+    can try the next rotation. Timeout / runtime failure is sticky for the
+    process — reset() must not revive a hung wxocr.dll.
+    """
 
     def __init__(
         self,
@@ -47,15 +52,21 @@ class DualOcrEngine:
 
     @property
     def provider(self) -> str:
+        if self._wechat is not None and not self._disable_wechat:
+            return getattr(self._wechat, "provider", "CPU")
         if self._ppocr is not None:
             return getattr(self._ppocr, "provider", "CPU")
         return getattr(self._wechat, "provider", "CPU")
 
     def reset(self) -> None:
-        self._disable_wechat = False
         self.last_actual = self.primary_name
-        self.last_fallback_used = self._wechat is None
-        self.last_reason = None if self._wechat is not None else "wechat_unavailable"
+        self.last_fallback_used = self._wechat is None or self._disable_wechat
+        if self._wechat is None:
+            self.last_reason = "wechat_unavailable"
+        elif self._disable_wechat:
+            self.last_reason = self.last_reason or "wechat_disabled"
+        else:
+            self.last_reason = None
         self.wechat_calls = 0
         self.ppocr_calls = 0
         self.fallback_events = []
@@ -100,19 +111,30 @@ class DualOcrEngine:
             try:
                 self.wechat_calls += 1
                 result, elapse = self._wechat(image)
+                n = len(result or [])
                 if is_valid_ocr_result(result):
+                    LOG.info("[OCR] WeChat %d 行, %.2fs", n, float(elapse or 0))
                     self.last_actual = "wechat"
                     self.last_fallback_used = False
                     self.last_reason = None
                     return result, elapse
+                LOG.warning("[OCR] WeChat 空结果, %.2fs", float(elapse or 0))
+                if self._ppocr is None:
+                    self.last_actual = "wechat"
+                    self.last_reason = "wechat_empty"
+                    return result or [], elapse
                 return self._fallback(image, "wechat_empty")
             except WeChatOcrTimeout:
                 LOG.exception("WeChat OCR timeout")
                 self._disable_wechat = True
+                if self._ppocr is None:
+                    raise
                 return self._fallback(image, "wechat_timeout")
             except Exception:
                 LOG.exception("WeChat OCR runtime failed")
                 self._disable_wechat = True
+                if self._ppocr is None:
+                    raise
                 return self._fallback(image, "wechat_runtime_failed")
         if self._ppocr is None:
             raise RuntimeError("No OCR engine available")
@@ -121,6 +143,7 @@ class DualOcrEngine:
         if self._wechat is None:
             self.last_fallback_used = True
             self.last_reason = self.last_reason or "wechat_unavailable"
+        LOG.info("[OCR] PP-OCR pass %d", self.ppocr_calls)
         return self._ppocr(image)
 
 
@@ -136,11 +159,19 @@ def _init_ppocr(config: dict | None = None):
         return _create_engine("rapidocr", "v3" if model == "v3" else "v6_medium")
 
 
+def _want_ppocr_fallback(config: dict | None, wechat) -> bool:
+    """Load PP-OCR only when WeChat is missing, or fallback is explicitly on."""
+    wx_cfg = (config or {}).get("wechat_ocr") or {}
+    if wechat is None:
+        return True
+    return wx_cfg.get("fallback_ppocr") is True
+
+
 class OcrService:
     """Public OCR entry used by the pipeline and GUI.
 
-    Image → WeChat OCR → on any failure PP-OCRv6, with LicenseOCR
-    rotation / deskew / multi-pass preprocess kept intact.
+    Default: WeChat only. PP-OCRv6 is loaded only if WeChat is unavailable
+    or ``wechat_ocr.fallback_ppocr`` is true.
     """
 
     def __init__(
@@ -163,11 +194,15 @@ class OcrService:
             if self._wechat is None and wechat_enabled:
                 try:
                     self._wechat = WeChatOCREngine(self._config)
+                    if not _want_ppocr_fallback(self._config, self._wechat):
+                        LOG.info("[OCR] WeChat ready — skip PP-OCRv6")
                 except Exception as exc:
                     LOG.exception("WeChat OCR engine not started")
                     self._wechat_error = str(exc)
                     self._wechat = None
-            if self._ppocr is None:
+            if self._ppocr is None and _want_ppocr_fallback(self._config, self._wechat):
+                if self._wechat is not None:
+                    LOG.info("[OCR] PP-OCRv6 fallback requested, loading…")
                 self._ppocr = _init_ppocr(self._config)
 
         self._dual = DualOcrEngine(self._wechat, self._ppocr, timeout=timeout)
@@ -211,6 +246,7 @@ class OcrService:
         return {
             "wechat": wx,
             "ppocr_v6": "READY" if self._ppocr is not None else "UNAVAILABLE",
+            "ppocr_loaded": self._ppocr is not None,
             "primary": self.primary_name,
             "fallback_mode": self._wechat is None,
         }

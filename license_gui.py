@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import subprocess
@@ -219,8 +220,11 @@ def _log_ocr_health(log, engine=None):
             status = engine.health_status()
             wx = status.get("wechat") or {}
             log(f"  主 OCR: {status.get('primary')}", "ok")
-            log(f"  Fallback 模式: {'是' if status.get('fallback_mode') else '否'}",
-                "warn" if status.get("fallback_mode") else "ok")
+            if status.get("primary") == "wechat" and not status.get("ppocr_loaded"):
+                log("  仅微信 OCR（不加载 PP-OCRv6）", "ok")
+            else:
+                log(f"  Fallback 模式: {'是' if status.get('fallback_mode') else '否'}",
+                    "warn" if status.get("fallback_mode") else "ok")
         else:
             wx = wechat_ocr_health_check(cfg, init=False)
         if wx.get("initialized") or wx.get("ready"):
@@ -244,6 +248,36 @@ def _log_ocr_health(log, engine=None):
             log("  AI 语义校验: 未配置 (仅规则模式)", "dim")
     except Exception as exc:
         log(f"  AI health check failed: {exc}", "warn")
+
+
+def _pipe_license_logs(log):
+    """Forward license_trans INFO logs into the GUI pane during a job."""
+    lt = logging.getLogger("license_trans")
+    lt.setLevel(logging.INFO)
+
+    class _Handler(logging.Handler):
+        def emit(self, record):
+            try:
+                msg = record.getMessage()
+                if record.levelno >= logging.ERROR:
+                    level = "err"
+                elif record.levelno >= logging.WARNING:
+                    level = "warn"
+                else:
+                    level = "dim"
+                log(msg, level)
+            except Exception:
+                pass
+
+    handler = _Handler()
+    handler.setLevel(logging.INFO)
+    lt.addHandler(handler)
+    lt.propagate = False
+
+    def detach():
+        lt.removeHandler(handler)
+
+    return detach
 
 
 def collect_images(paths: list[Path], recursive: bool = False) -> list[Path]:
@@ -312,7 +346,7 @@ def ensure_license_deps(log) -> bool:
 
 
 OCR_ENGINE_CHOICES = (
-    ("wechat_v6", "微信 OCR（PP-OCRv6 回退）"),
+    ("wechat_v6", "仅微信 OCR"),
     ("v6_medium", "仅 PP-OCRv6 Medium"),
     ("v3", "仅 PP-OCRv3（旧版/快）"),
 )
@@ -330,6 +364,7 @@ def _save_ocr_choice(key: str) -> None:
     wx = dict(cfg.get("wechat_ocr") or {})
     if key == "wechat_v6":
         wx["enabled"] = True
+        wx["fallback_ppocr"] = False
         cfg["ocr_engine"] = "wechat"
         cfg["ocr_model"] = "v6_medium"
     elif key == "v3":
@@ -361,6 +396,34 @@ def _read_ocr_choice_label() -> str:
     else:
         key = "v6_medium"
     return _OCR_LABEL_BY_KEY.get(key, _OCR_LABEL_BY_KEY["wechat_v6"])
+
+
+def _read_ai_api_key() -> str:
+    cfg_path = ROOT / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return str((cfg.get("ai") or {}).get("api_key") or "").strip()
+    except Exception:
+        return ""
+
+
+def _save_ai_api_key(key: str) -> None:
+    """Persist OpenAI-compatible API key used by license translation AI."""
+    cfg_path = ROOT / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    ai = dict(cfg.get("ai") or {})
+    key = (key or "").strip()
+    ai["api_key"] = key
+    if key:
+        ai["enabled"] = True
+        ai.setdefault("base_url", "https://api.deepseek.com/v1")
+        ai.setdefault("model", "deepseek-chat")
+        ai.setdefault("timeout", 60)
+    cfg["ai"] = ai
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _save_ocr_model(model: str) -> None:
@@ -527,9 +590,10 @@ class LicensePage(ttk.Frame):
         self.lbl_progress.pack(anchor="w", padx=10)
 
         self.preview = tk.Label(
-            right, text="转换完成后预览英文页",
-            bg="#f0f0f0", fg="#777777", relief="groove", bd=1)
+            right, text="转换完成后预览英文页（点击打开 PDF）",
+            bg="#f0f0f0", fg="#777777", relief="groove", bd=1, cursor="hand2")
         self.preview.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+        self.preview.bind("<Button-1>", lambda _e: self.open_selected_pdf())
 
         log_box = ttk.LabelFrame(self, text=" 日志 ")
         log_box.pack(fill="both", expand=True, padx=12, pady=(0, 10))
@@ -695,63 +759,67 @@ class LicensePage(ttk.Frame):
         from license_trans.ocr_service import OcrService
         from license_trans.pipeline import detect_license, _pick_best_license
 
-        log("加载 OCR 引擎(首次会稍慢)…", "dim")
+        detach_logs = _pipe_license_logs(log)
         try:
-            from license_trans.pipeline import load_config
-            engine = OcrService(load_config())
-        except Exception as e:
-            log(f"OCR 引擎加载失败: {e}", "err")
-            self.q.put(("detect_done", 0, len(images)))
-            return
-        prov = getattr(engine, "gpu_provider", "CPU")
-        eng = getattr(engine, "engine_name", "RapidOCR")
-        quick_workers = min(5, len(images))
-        log(f"OCR 引擎就绪: {eng} ({prov}), 并行{quick_workers}线程快速扫描…", "ok")
-        _log_ocr_health(log, engine)
-        total = len(images)
-        by_dir: dict[str, list[tuple[Path, list]]] = {}
-        scanned = 0
-        completed = 0
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=quick_workers) as pool:
-            futures = {pool.submit(engine.quick_detect, img): img for img in images}
-            for fut in as_completed(futures):
-                if self.stop_event.is_set():
-                    for f in futures:
-                        f.cancel()
-                    log("已停止扫描", "warn")
-                    break
-                img_path = futures[fut]
-                completed += 1
-                try:
-                    is_license, lines = fut.result()
-                except Exception as exc:
-                    log(f"扫描失败 {img_path.name}: {exc}", "err")
-                    is_license = False
-                    lines = []
-                if is_license:
-                    key = str(img_path.parent.resolve())
-                    by_dir.setdefault(key, []).append((img_path, lines))
-                    scanned += 1
-                    log(f"  ✓ 执照  {img_path.name}  ({len(lines)} 行)", "ok")
-                self.q.put(("detect_progress", completed, total, img_path.name, is_license))
-                if completed % 20 == 0:
-                    log(f"  进度 {completed}/{total}  已找到 {scanned} 张执照", "dim")
-        # Pick best license per directory
-        best_per_dir: list[Path] = []
-        for dir_path, candidates in by_dir.items():
-            if len(candidates) == 1:
-                best_per_dir.append(candidates[0][0])
-            else:
-                best, _ = _pick_best_license(candidates)
-                best_per_dir.append(best)
-                log(f"  {Path(dir_path).name}: {len(candidates)} 张执照, "
-                    f"选用 {best.name}", "dim")
-        for p in best_per_dir:
-            self.q.put(("detect_hit", str(p.resolve())))
-        log(f"扫描完成: {scanned} 张执照, 去重后保留 {len(best_per_dir)} 张 "
-            f"(每个公司文件夹仅保留最清晰的一张)", "ok")
-        self.q.put(("detect_done", len(best_per_dir), total))
+            log("加载 OCR 引擎(首次会稍慢)…", "dim")
+            try:
+                from license_trans.pipeline import load_config
+                engine = OcrService(load_config())
+            except Exception as e:
+                log(f"OCR 引擎加载失败: {e}", "err")
+                self.q.put(("detect_done", 0, len(images)))
+                return
+            prov = getattr(engine, "gpu_provider", "CPU")
+            eng = getattr(engine, "engine_name", "RapidOCR")
+            quick_workers = min(5, len(images))
+            log(f"OCR 引擎就绪: {eng} ({prov}), 并行{quick_workers}线程快速扫描…", "ok")
+            _log_ocr_health(log, engine)
+            total = len(images)
+            by_dir: dict[str, list[tuple[Path, list]]] = {}
+            scanned = 0
+            completed = 0
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=quick_workers) as pool:
+                futures = {pool.submit(engine.quick_detect, img): img for img in images}
+                for fut in as_completed(futures):
+                    if self.stop_event.is_set():
+                        for f in futures:
+                            f.cancel()
+                        log("已停止扫描", "warn")
+                        break
+                    img_path = futures[fut]
+                    completed += 1
+                    try:
+                        is_license, lines = fut.result()
+                    except Exception as exc:
+                        log(f"扫描失败 {img_path.name}: {exc}", "err")
+                        is_license = False
+                        lines = []
+                    if is_license:
+                        key = str(img_path.parent.resolve())
+                        by_dir.setdefault(key, []).append((img_path, lines))
+                        scanned += 1
+                        log(f"  ✓ 执照  {img_path.name}  ({len(lines)} 行)", "ok")
+                    self.q.put(("detect_progress", completed, total, img_path.name, is_license))
+                    if completed % 20 == 0:
+                        log(f"  进度 {completed}/{total}  已找到 {scanned} 张执照", "dim")
+            # Pick best license per directory
+            best_per_dir: list[Path] = []
+            for dir_path, candidates in by_dir.items():
+                if len(candidates) == 1:
+                    best_per_dir.append(candidates[0][0])
+                else:
+                    best, _ = _pick_best_license(candidates)
+                    best_per_dir.append(best)
+                    log(f"  {Path(dir_path).name}: {len(candidates)} 张执照, "
+                        f"选用 {best.name}", "dim")
+            for p in best_per_dir:
+                self.q.put(("detect_hit", str(p.resolve())))
+            log(f"扫描完成: {scanned} 张执照, 去重后保留 {len(best_per_dir)} 张 "
+                f"(每个公司文件夹仅保留最清晰的一张)", "ok")
+            self.q.put(("detect_done", len(best_per_dir), total))
+        finally:
+            detach_logs()
 
     def scan_library(self):
         """Scan 中国执照库/ — detect licenses, translate, move to 资料/."""
@@ -793,29 +861,33 @@ class LicensePage(ttk.Frame):
         from license_trans.ocr_service import OcrService
         from license_trans.pipeline import process_license_library
 
-        log("加载 OCR 引擎(首次会稍慢)…", "dim")
+        detach_logs = _pipe_license_logs(log)
         try:
-            from license_trans.pipeline import load_config
-            engine = OcrService(load_config())
-        except Exception as e:
-            log(f"OCR 引擎加载失败: {e}", "err")
-            self.q.put(("scan_done", 0, 0, 0, 0))
-            return
-        prov = getattr(engine, "gpu_provider", "CPU")
-        eng = getattr(engine, "engine_name", "RapidOCR")
-        log(f"OCR 引擎就绪: {eng} ({prov}), 开始扫描执照库…", "ok")
-        _log_ocr_health(log, engine)
-        try:
-            result = process_license_library(
-                source, dest, max_workers=5, engine=engine,
-                log=log, progress=progress, stop_event=self.stop_event)
-        except Exception as exc:
-            log(f"扫描执照库异常: {exc}", "err")
-            self.q.put(("scan_done", 0, 0, 0, 0))
-            return
-        self.q.put(("scan_done",
-                     result["processed"], result["failed"],
-                     result["moved"], result["skipped"]))
+            log("加载 OCR 引擎(首次会稍慢)…", "dim")
+            try:
+                from license_trans.pipeline import load_config
+                engine = OcrService(load_config())
+            except Exception as e:
+                log(f"OCR 引擎加载失败: {e}", "err")
+                self.q.put(("scan_done", 0, 0, 0, 0))
+                return
+            prov = getattr(engine, "gpu_provider", "CPU")
+            eng = getattr(engine, "engine_name", "RapidOCR")
+            log(f"OCR 引擎就绪: {eng} ({prov}), 开始扫描执照库…", "ok")
+            _log_ocr_health(log, engine)
+            try:
+                result = process_license_library(
+                    source, dest, max_workers=5, engine=engine,
+                    log=log, progress=progress, stop_event=self.stop_event)
+            except Exception as exc:
+                log(f"扫描执照库异常: {exc}", "err")
+                self.q.put(("scan_done", 0, 0, 0, 0))
+                return
+            self.q.put(("scan_done",
+                         result["processed"], result["failed"],
+                         result["moved"], result["skipped"]))
+        finally:
+            detach_logs()
 
     def ingest(self, paths: list[Path]):
         files = collect_images(paths)
@@ -947,109 +1019,113 @@ class LicensePage(ttk.Frame):
         from license_trans.ocr_service import OcrService
         from license_trans.pipeline import convert_image
 
-        log("加载 OCR 引擎(首次会稍慢)…", "dim")
+        detach_logs = _pipe_license_logs(log)
         try:
-            from license_trans.pipeline import load_config
-            engine = OcrService(load_config())
-        except Exception as e:
-            log(f"OCR 引擎加载失败: {e}", "err")
-            self.q.put(("done", 0, 0, len(paths), True))
-            return
-        prov = getattr(engine, "gpu_provider", "CPU")
-        eng = getattr(engine, "engine_name", "RapidOCR")
-        convert_workers = min(3, len(paths))
-        log(f"OCR 引擎就绪: {eng} ({prov}), 并行{convert_workers}线程转换…", "ok")
-        _log_ocr_health(log, engine)
-        done = skipped = failed = 0
-        completed = 0
-        total = len(paths)
-        work_dir = ROOT / "license_work"
-
-        def _process_one(raw):
-            src = Path(raw)
-            if out_override:
-                out_dir = Path(out_override)
-            else:
-                out_dir = Path(self._file_dirs.get(raw, str(src.parent)))
-            dest = out_dir / (src.stem + "英文版.pdf")
-            self.q.put(("item", raw, STATUS_RUN, "", ""))
-            log(f"  → {src.name}")
+            log("加载 OCR 引擎(首次会稍慢)…", "dim")
             try:
-                info = convert_image(
-                    src, dest, work_dir=work_dir, ocr=engine,
-                    issue_date=issue_date or None)
-                return ("ok", raw, dest, info)
-            except NotFormatA as exc:
-                return ("skip", raw, str(exc))
-            except Exception as exc:
-                return ("fail", raw, str(exc)[:200])
+                from license_trans.pipeline import load_config
+                engine = OcrService(load_config())
+            except Exception as e:
+                log(f"OCR 引擎加载失败: {e}", "err")
+                self.q.put(("done", 0, 0, len(paths), True))
+                return
+            prov = getattr(engine, "gpu_provider", "CPU")
+            eng = getattr(engine, "engine_name", "RapidOCR")
+            convert_workers = min(3, len(paths))
+            log(f"OCR 引擎就绪: {eng} ({prov}), 并行{convert_workers}线程转换…", "ok")
+            _log_ocr_health(log, engine)
+            done = skipped = failed = 0
+            completed = 0
+            total = len(paths)
+            work_dir = ROOT / "license_work"
 
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=convert_workers) as pool:
-            futures = {pool.submit(_process_one, raw): raw for raw in paths}
-            for fut in as_completed(futures):
-                if self.stop_event.is_set():
-                    for f in futures:
-                        f.cancel()
-                    log("已停止, 剩余文件未处理", "warn")
-                    break
-                completed += 1
+            def _process_one(raw):
+                src = Path(raw)
+                if out_override:
+                    out_dir = Path(out_override)
+                else:
+                    out_dir = Path(self._file_dirs.get(raw, str(src.parent)))
+                dest = out_dir / (src.stem + "英文版.pdf")
+                self.q.put(("item", raw, STATUS_RUN, "", ""))
+                log(f"  → {src.name}")
                 try:
-                    result = fut.result()
+                    info = convert_image(
+                        src, dest, work_dir=work_dir, ocr=engine,
+                        issue_date=issue_date or None)
+                    return ("ok", raw, dest, info)
+                except NotFormatA as exc:
+                    return ("skip", raw, str(exc))
                 except Exception as exc:
-                    failed += 1
-                    log(f"异常: {exc}", "err")
+                    return ("fail", raw, str(exc)[:200])
+
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(max_workers=convert_workers) as pool:
+                futures = {pool.submit(_process_one, raw): raw for raw in paths}
+                for fut in as_completed(futures):
+                    if self.stop_event.is_set():
+                        for f in futures:
+                            f.cancel()
+                        log("已停止, 剩余文件未处理", "warn")
+                        break
+                    completed += 1
+                    try:
+                        result = fut.result()
+                    except Exception as exc:
+                        failed += 1
+                        log(f"异常: {exc}", "err")
+                        self.q.put(("progress", completed, total))
+                        continue
+                    kind = result[0]
+                    raw = result[1]
+                    if kind == "ok":
+                        _, _, dest, info = result
+                        warnings = list(dict.fromkeys(
+                            (info["fields"].get("warnings") or [])
+                            + (info["english"].get("warnings") or [])))
+                        needs = list(info.get("needs_review") or [])
+                        st = info.get("status") or {}
+                        if needs:
+                            note = "需人工确认: " + ", ".join(needs)
+                        elif warnings:
+                            note = "需核对: " + ", ".join(_warn_label(w) for w in warnings)
+                        else:
+                            note = "字段完整"
+                        row_status = STATUS_REVIEW if needs else STATUS_DONE
+                        self.q.put(("item", raw, row_status, str(dest), note))
+                        self.q.put(("fields", raw, info["fields"]))
+                        self.q.put(("preview", str(dest)))
+                        log(f"  ✓ {Path(dest).name}", "ok")
+                        log(
+                            f"  主 OCR：{st.get('ocr_primary') or info.get('ocr_primary') or '—'}  "
+                            f"Fallback：{'是' if st.get('fallback_used') or info.get('fallback_used') else '否'}  "
+                            f"AI 校验：{'需复核' if needs else ('通过' if st.get('ai_validated') else '规则模式')}  "
+                            f"字段重识别：{st.get('field_retries', 0)}  "
+                            f"联网核验：{st.get('web_verified', 0)}  "
+                            f"人工确认：{st.get('need_review', len(needs))}",
+                            "err" if needs else "ok",
+                        )
+                        if needs:
+                            log(f"  ⚠ {Path(raw).name}  关键字段无法确认: {', '.join(needs)}", "err")
+                        elif warnings:
+                            log(f"  {Path(raw).name}  {note}", "warn")
+                        done += 1
+                    elif kind == "skip":
+                        _, _, exc_msg = result
+                        self.q.put(("item", raw, STATUS_SKIP, "", exc_msg))
+                        log(f"  ⊘ {Path(raw).name}  {exc_msg}", "warn")
+                        skipped += 1
+                    elif kind == "fail":
+                        _, _, exc_msg = result
+                        self.q.put(("item", raw, STATUS_ERR, "", exc_msg))
+                        log(f"  ✗ {Path(raw).name}  {exc_msg}", "err")
+                        failed += 1
                     self.q.put(("progress", completed, total))
-                    continue
-                kind = result[0]
-                raw = result[1]
-                if kind == "ok":
-                    _, _, dest, info = result
-                    warnings = list(dict.fromkeys(
-                        (info["fields"].get("warnings") or [])
-                        + (info["english"].get("warnings") or [])))
-                    needs = list(info.get("needs_review") or [])
-                    st = info.get("status") or {}
-                    if needs:
-                        note = "需人工确认: " + ", ".join(needs)
-                    elif warnings:
-                        note = "需核对: " + ", ".join(_warn_label(w) for w in warnings)
-                    else:
-                        note = "字段完整"
-                    row_status = STATUS_REVIEW if needs else STATUS_DONE
-                    self.q.put(("item", raw, row_status, str(dest), note))
-                    self.q.put(("fields", raw, info["fields"]))
-                    self.q.put(("preview", str(dest)))
-                    log(f"  ✓ {Path(dest).name}", "ok")
-                    log(
-                        f"  主 OCR：{st.get('ocr_primary') or info.get('ocr_primary') or '—'}  "
-                        f"Fallback：{'是' if st.get('fallback_used') or info.get('fallback_used') else '否'}  "
-                        f"AI 校验：{'通过' if st.get('ai_validated') else '规则模式'}  "
-                        f"字段重识别：{st.get('field_retries', 0)}  "
-                        f"联网核验：{st.get('web_verified', 0)}  "
-                        f"人工确认：{st.get('need_review', len(needs))}",
-                        "err" if needs else "ok",
-                    )
-                    if needs:
-                        log(f"  ⚠ {Path(raw).name}  关键字段无法确认: {', '.join(needs)}", "err")
-                    elif warnings:
-                        log(f"  {Path(raw).name}  {note}", "warn")
-                    done += 1
-                elif kind == "skip":
-                    _, _, exc_msg = result
-                    self.q.put(("item", raw, STATUS_SKIP, "", exc_msg))
-                    log(f"  ⊘ {Path(raw).name}  {exc_msg}", "warn")
-                    skipped += 1
-                elif kind == "fail":
-                    _, _, exc_msg = result
-                    self.q.put(("item", raw, STATUS_ERR, "", exc_msg))
-                    log(f"  ✗ {Path(raw).name}  {exc_msg}", "err")
-                    failed += 1
-                self.q.put(("progress", completed, total))
-        self.q.put(("done", done, skipped, failed, self.stop_event.is_set()))
+            self.q.put(("done", done, skipped, failed, self.stop_event.is_set()))
+        finally:
+            detach_logs()
 
     def _drain(self):
-        MAX_PER_TICK = 10
+        MAX_PER_TICK = 40
         processed = 0
         row_dirty = False
         pending_preview = None
@@ -1152,13 +1228,12 @@ class LicensePage(ttk.Frame):
                 pass
             self._log_buffer.clear()
 
-        # Sync actions once if rows changed (not per row)
-        if row_dirty:
-            self._sync_actions()
-
         # Render only the latest preview (skip stale ones)
         if pending_preview:
             self._show_preview(pending_preview)
+
+        if row_dirty or pending_preview:
+            self._sync_actions()
 
         self.after(50, self._drain)
 
@@ -1172,6 +1247,13 @@ class LicensePage(ttk.Frame):
         if output:
             vals[2] = Path(output).name
             self._outputs[path] = output
+            self._last_pdf = output
+            try:
+                self.tree.selection_set(iid)
+                self.tree.focus(iid)
+                self.tree.see(iid)
+            except tk.TclError:
+                pass
         vals[3] = note or "—"
         self.tree.item(iid, values=vals, tags=(status,))
         if sync:
@@ -1194,6 +1276,10 @@ class LicensePage(ttk.Frame):
                     return p
         if self._last_pdf:
             p = Path(self._last_pdf)
+            if p.exists():
+                return p
+        for path in reversed(list(self._outputs.values())):
+            p = Path(path)
             if p.exists():
                 return p
         return None
@@ -1296,12 +1382,15 @@ class LicensePage(ttk.Frame):
         """Called on main thread via after(0) — only applies if token is current."""
         if token != self._preview_token:
             return  # stale render, skip
+        self._last_pdf = pdf_path
         if img is None:
             self.preview.config(image="", text=Path(pdf_path).name)
+            self._sync_actions()
             return
         from PIL import ImageTk
         self._preview_photo = ImageTk.PhotoImage(img)
         self.preview.config(image=self._preview_photo, text="")
+        self._sync_actions()
 
     def _set_busy(self, busy: bool):
         self._busy = busy

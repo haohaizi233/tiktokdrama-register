@@ -78,3 +78,42 @@ def test_wechat_none_score_does_not_beat_ppocr_score():
     # None score contributes 0, so 乙公司 wins on OCR score unless rules say otherwise.
     assert result.winner.text == "乙公司"
     assert result.winner.score == 0.95
+
+
+def test_fusion_prefers_parsed_scope_over_watermark():
+    fusion = OcrCandidateFusion()
+    parsed = (
+        "般项目:建筑材料销售:金属材料销售:木材销售:水泥制品销"
+        "日用品批发:机械设备租赁:园林绿化工程施工:日用百货销"
+        "工程管理服务:装印搬运:上石方工程施工:金属门窗工程施工"
+        "(除依法须经批准的项目外，凭营业执照依法自主开展经营活"
+    )
+    crop = (
+        "经营范般项日:建筑材料销售:金属材料销售:木材售:阀门和旋塞销售:"
+        "轴承销售:橡胶制品销售:售:日用品批发:机械设备租赁:园林绿化工程W:"
+        "工程管理服务:装卸搬运:士石方工程施工:"
+        "(除依法须经批准的项目外，凭营业执照依动)CJDGL"
+    )
+    result = fusion.fuse_field_ex("scope", [
+        FieldOcrCandidate("scope", "parsed", "original", parsed, 0.99),
+        FieldOcrCandidate("scope", "wechat", "clahe", crop, 0.86),
+    ])
+    assert result.winner is not None
+    assert result.winner.engine == "parsed"
+    assert "CJDGL" not in result.winner.text
+
+
+def test_scope_region_inferred_when_label_missing():
+    import numpy as np
+    from license_trans.field_crop import FieldCropper, infer_scope_region
+
+    img = np.zeros((900, 1400, 3), dtype=np.uint8)
+    lines = [
+        OcrLine("法定代表人尹益高", 0.9, 250, 650, 460, 680),
+        OcrLine("制的项目)", 0.9, 400, 740, 480, 765),
+        OcrLine("所江西省上饶市横峰县", 0.9, 1000, 710, 1300, 740),
+    ]
+    region = infer_scope_region(img, lines)
+    assert region is not None
+    cropper = FieldCropper(img, lines)
+    assert cropper.find_field_region("scope") == region

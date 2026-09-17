@@ -1,0 +1,62 @@
+{
+  "般项目": {
+    "source": "般项目",
+    "translation": "general items",
+    "verified": false,
+    "provider": "ai"
+  },
+  "售": {
+    "source": "售",
+    "translation": "sell",
+    "verified": false,
+    "provider": "ai"
+  },
+  "园": {
+    "source": "园",
+    "translation": "Garden",
+    "verified": false,
+    "provider": "ai"
+  },
+  "绿化": {
+    "source": "绿化",
+    "translation": "Landscaping",
+    "verified": false,
+    "provider": "ai"
+  },
+  "工": {
+    "source": "工",
+    "translation": "work",
+    "verified": false,
+    "provider": "ai"
+  },
+  "凭营业执照依动": {
+    "source": "凭营业执照依动",
+    "translation": "Subject to the business license, conduct [activities]",
+    "verified": false,
+    "provider": "ai"
+  },
+  "范般项目": {
+    "source": "范般项目",
+    "translation": "Fanban Project",
+    "verified": false,
+    "provider": "ai"
+  },
+  "士石方": {
+    "source": "士石方",
+    "translation": "Earthwork",
+    "verified": false,
+    "provider": "ai"
+  },
+  "横峰县育民": {
+    "source": "横峰县育民",
+    "translation": "Hengfeng County Yumin",
+    "verified": false,
+    "provider": "ai"
+  },
+  "有限公司": {
+    "source": "有限公司",
+    "translation": "Co., Ltd.",
+    "verified": false,
+    "provider": "ai"
+  }
+}

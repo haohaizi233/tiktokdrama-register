@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict
 
 from .ocr import OcrLine
 from .divisions import places_from_usci, snap_text
-from .usci import checksum_ok, repair_usci
+from .usci import checksum_ok, is_company_usci, repair_usci
 
 OCR_FIXES = (
     ("衣副产品", "农副产品"),
@@ -98,6 +98,7 @@ CREDIT_GUARDED_RE = re.compile(
     r"(?:\s*[\(（]\s*(\d+\s*-\s*\d+)\s*[\)）])?"
     r"(?![0-9A-Z])"
 )
+_USCI_WATERMARK_RE = re.compile(r"(?:SC)?JDGL", re.I)
 DATE_RE = re.compile(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 COPY_RE = re.compile(r"[\(（]\s*(\d+\s*-\s*\d+)\s*[\)）]")
 
@@ -174,6 +175,33 @@ def _clean_value(text: str) -> str:
     # 类型 label that lost its leading char (vertical OCR) leaves 型.
     text = re.sub(r"^型(?=[\u4e00-\u9fff])", "", text)
     return text.strip()
+
+
+def _canonical_term(text: str, blob: str = "") -> str:
+    """Keep only the date span / 至长期, dropping address glued onto the value."""
+    local = re.sub(r"\s+", "", text or "")
+    src = local + re.sub(r"\s+", "", blob or "")
+    m = re.search(DATE_RE.pattern + r"至长期", local) or re.search(
+        r"(?:营业期限|经营期限|业期限)" + DATE_RE.pattern + r"至长期", src
+    ) or re.search(DATE_RE.pattern + r"至长期", src)
+    if m:
+        return f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日至长期"
+    m = re.search(DATE_RE.pattern + r"至" + DATE_RE.pattern, local or src)
+    if m:
+        return (
+            f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日"
+            f"至{int(m.group(4)):04d}年{int(m.group(5)):02d}月{int(m.group(6)):02d}日"
+        )
+    if "长期" in local or (not local and "长期" in src and "营业期限" in src):
+        dm = DATE_RE.search(local) or re.search(
+            r"(?:营业期限|经营期限|业期限)" + DATE_RE.pattern, src)
+        if dm:
+            return (
+                f"{int(dm.group(1)):04d}年{int(dm.group(2)):02d}月"
+                f"{int(dm.group(3)):02d}日至长期"
+            )
+        return "长期"
+    return (text or "").strip()
 
 
 def clip_scope_text(text: str) -> str:
@@ -470,20 +498,28 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
     lines = [line for line in lines if not _is_noise(line)]
     blob = "".join(line.text for line in lines)
 
-    compact_blob = blob.replace(" ", "")
+    compact_blob = _USCI_WATERMARK_RE.sub("", blob.replace(" ", ""))
     credit_matches = list(CREDIT_GUARDED_RE.finditer(compact_blob))
-    if not credit_matches:
-        credit_matches = list(CREDIT_RE.finditer(compact_blob))
+    unguarded = list(CREDIT_RE.finditer(compact_blob))
 
     def _credit_rank(m) -> tuple[int, int]:
-        code = m.group(1)
-        if checksum_ok(code):
+        raw = m.group(1)
+        code = repair_usci(raw)
+        if checksum_ok(code) and is_company_usci(code):
             return (0, 0)
-        if checksum_ok(repair_usci(code)):
+        if checksum_ok(code):
             return (0, 1)
-        if code.startswith("91"):
+        if checksum_ok(repair_usci(raw)):
+            return (0, 2)
+        if is_company_usci(code) or raw.startswith("91"):
             return (1, 0)
         return (2, 0)
+
+    def _has_company_usci(matches) -> bool:
+        return any(_credit_rank(m)[0] == 0 for m in matches)
+
+    if not credit_matches or (unguarded and not _has_company_usci(credit_matches)):
+        credit_matches = credit_matches + unguarded
 
     if credit_matches:
         best = min(credit_matches, key=_credit_rank)
@@ -638,7 +674,12 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
         m = DATE_RE.search(established)
         fields.established = f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日"
     fields.address = snap_text(grab("address", ("住所", "经营场所", "营业场所"), ("authority",)), prefer)
-    fields.term = grab("term", ("营业期限", "经营期限"), ("authority",))
+    fields.term = _canonical_term(
+        grab("term", ("营业期限", "经营期限"), ("authority",)),
+        "".join(ln.text for ln in lines),
+    )
+    if fields.term and "term" in fields.warnings:
+        fields.warnings.remove("term")
     issue_from_label = grab("issue_date", ("发证日期", "核准日期", "发照日期"), ())
     if issue_from_label and DATE_RE.search(issue_from_label):
         m = DATE_RE.search(issue_from_label)

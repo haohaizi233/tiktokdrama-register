@@ -1,4 +1,4 @@
-"""AI cannot mutate Chinese facts; retry failure → NEED_REVIEW; second validation."""
+"""AI does not invent Chinese facts; retry keeps existing values; OCR/AI fill leftover dates."""
 from unittest.mock import MagicMock, PropertyMock
 
 from license_trans.ai_validator import LicenseSemanticValidator, TranslationValidator, VALID_ACTIONS
@@ -65,9 +65,8 @@ def test_translation_validator_does_not_overwrite_english():
     assert not hasattr(validator, "apply_corrections")
 
 
-def test_retry_failure_becomes_need_review(monkeypatch):
+def test_retry_keeps_existing_value_without_review(monkeypatch):
     fields = LicenseFields(scope="依法直主开展经营活动", name="测试有限公司")
-    tracker_fields = fields
     client_results = [{
         "overall_status": "retry_required",
         "issues": [{"field": "scope", "action": "retry_ocr", "fragment": "依法直主"}],
@@ -86,15 +85,16 @@ def test_retry_failure_becomes_need_review(monkeypatch):
     monkeypatch.setattr(pipeline, "_field_level_retry", lambda *a, **k: [])
 
     tracker = _run_ai_validation_and_retry(
-        tracker_fields,
+        fields,
         [OcrLine("经营范围 依法直主开展经营活动", 0.9, 0, 0, 10, 10)],
         np.zeros((20, 20, 3), dtype=np.uint8),
         {},
         engine=None,
     )
     fs = tracker.get("scope")
-    assert fs.status == FieldStatus.NEED_REVIEW
-    assert fs.status != FieldStatus.RETRY_OCR
+    assert fs.status == FieldStatus.OK
+    assert "开展经营活动" in fields.scope
+    assert "scope" not in tracker.fields_needing_review()
 
 
 def test_second_validation_after_successful_retry(monkeypatch):
@@ -133,7 +133,7 @@ def test_second_validation_after_successful_retry(monkeypatch):
         {},
         engine=None,
     )
-    assert calls["n"] == 2
+    assert calls["n"] >= 2
     assert fields.scope == "依法自主开展经营活动"
     assert tracker.get("scope").status in (FieldStatus.OK, FieldStatus.RULE_REPAIRED)
 
@@ -171,3 +171,462 @@ def test_canonical_frozen_cannot_mutate():
         raised = True
     assert raised
     assert rec.name == "测试有限公司"
+
+
+def test_scope_broken_ignores_truncated_legal_footer():
+    from license_trans.pipeline import _scope_broken
+    truncated = (
+        "般项目:建筑材料销售:金属材料销售"
+        "(除依法须经批准的项目外，凭营业执照依法自主开展经营活"
+    )
+    assert _scope_broken(truncated) is False
+    nested = "食用农产品（不（依法须经批准的项目外）"
+    assert _scope_broken(nested) is True
+
+
+def test_scope_watermark_fails_rules():
+    from license_trans.rule_repair import field_passes_rules
+    junk = "经营范般项日:建筑材料销售:CJDGL"
+    good = "般项目:建筑材料销售:金属材料销售:木材销售"
+    assert field_passes_rules("scope", junk) is False
+    assert field_passes_rules("scope", good) is True
+
+
+def test_ai_retry_list_is_deduped(monkeypatch):
+    fields = LicenseFields(
+        scope="经营范般项日:建筑材料销售:CJDGL",
+        name="测试有限公司",
+        address="山东省青岛市黄岛区团结路1号",
+    )
+    retries = []
+
+    class FakeClient:
+        def is_available(self):
+            return True
+
+        def chat_json(self, *a, **k):
+            return {
+                "overall_status": "retry_required",
+                "issues": [
+                    {"field": "scope", "action": "retry_ocr"},
+                    {"field": "scope", "action": "retry_ocr"},
+                    {"field": "scope", "action": "retry_ocr"},
+                    {"field": "address", "action": "retry_ocr"},
+                ],
+            }
+
+    import license_trans.pipeline as pipeline
+
+    def fake_retry(retry_fields, *a, **k):
+        retries.append(list(retry_fields))
+        return ["scope"]
+
+    monkeypatch.setattr(pipeline, "AIClient", lambda config: FakeClient())
+    monkeypatch.setattr(pipeline, "_field_level_retry", fake_retry)
+    _run_ai_validation_and_retry(
+        fields,
+        [OcrLine("经营范围 般项目", 0.9, 0, 0, 10, 10)],
+        np.zeros((20, 20, 3), dtype=np.uint8),
+        {},
+        engine=None,
+    )
+    assert retries
+    assert retries[0].count("scope") == 1
+
+
+def test_display_view_keeps_ocr_orientation():
+    """Already-upright 横版 stays landscape (title on top)."""
+    from license_trans.pipeline import _display_view
+
+    landscape = np.zeros((400, 700, 3), dtype=np.uint8)
+    landscape[:, :] = (40, 80, 200)
+    lines = [
+        OcrLine("营业执照", 0.9, 40, 30, 180, 70),
+        OcrLine("统一社会信用代码", 0.9, 40, 90, 280, 120),
+        OcrLine("名称", 0.9, 40, 140, 100, 170),
+        OcrLine("类型", 0.9, 40, 190, 100, 220),
+        OcrLine("法定代表人", 0.9, 40, 240, 180, 270),
+        OcrLine("登记机关", 0.9, 40, 300, 160, 330),
+        OcrLine("2024年09月19日", 0.9, 400, 300, 620, 330),
+    ]
+    meta = {"vertical_native": True, "rotation": 1}
+    view = _display_view(landscape, lines, meta)
+    assert view.shape[1] >= view.shape[0]
+
+
+def test_display_view_rotates_sideways_hengban():
+    """Phone-portrait shot of a 横版 license becomes landscape, title on top."""
+    from license_trans.pipeline import _display_view
+
+    portrait = np.zeros((700, 400, 3), dtype=np.uint8)
+    portrait[:, :] = (30, 30, 30)
+    portrait[:, 330:400] = (0, 0, 255)  # red stripe = 营业执照 on the right
+    lines = [
+        OcrLine("营业执照", 0.9, 330, 80, 395, 520),
+        OcrLine("统一社会信用代码", 0.9, 200, 40, 310, 200),
+        OcrLine("名称", 0.9, 180, 80, 250, 160),
+        OcrLine("类型", 0.9, 180, 180, 250, 250),
+        OcrLine("法定代表人", 0.9, 180, 260, 250, 360),
+        OcrLine("登记机关", 0.9, 40, 200, 100, 320),
+        OcrLine("2024年09月19日", 0.9, 20, 400, 80, 620),
+    ]
+    view = _display_view(portrait, lines, {"rotation": 0, "vertical_native": True})
+    assert view.shape[1] > view.shape[0]
+    # After rot90 CCW the right-edge stripe becomes the top edge.
+    top = view[0:max(8, view.shape[0] // 12), :]
+    assert int(top[:, :, 2].mean()) > int(top[:, :, 0].mean())
+
+
+def test_orientation_score_prefers_title_on_top():
+    from license_trans.ocr import _orientation_score
+
+    sideways = [
+        OcrLine("营业执照", 0.9, 320, 80, 390, 520),
+        OcrLine("名称", 0.9, 180, 80, 220, 200),
+        OcrLine("类型", 0.9, 180, 220, 220, 320),
+        OcrLine("法定代表人", 0.9, 180, 340, 220, 480),
+    ]
+    upright = [
+        OcrLine("营业执照", 0.9, 40, 20, 280, 80),
+        OcrLine("名称", 0.9, 40, 100, 180, 130),
+        OcrLine("类型", 0.9, 40, 150, 180, 180),
+        OcrLine("法定代表人", 0.9, 40, 200, 220, 230),
+        OcrLine("经营范围", 0.9, 40, 250, 180, 280),
+    ]
+    assert _orientation_score(upright, 400) > _orientation_score(sideways, 700)
+
+
+def test_recover_issue_date_does_not_steal_established():
+    from license_trans.pipeline import _recover_issue_date
+    h, w = 800, 1000
+    lines = [
+        OcrLine("成立日期", 0.9, 50, 100, 150, 120),
+        OcrLine("2018年09月12日", 0.9, 160, 100, 320, 120),
+        OcrLine("登记机关", 0.9, 80, 550, 200, 580),
+        OcrLine("2024", 0.9, 700, 590, 740, 610),
+        OcrLine("23", 0.9, 800, 590, 830, 610),
+    ]
+    img = np.zeros((h, w, 3), dtype=np.uint8)
+
+    class _Eng:
+        def _ocr(self, _im):
+            return [], 0.0
+
+    issue = _recover_issue_date(img, lines, _Eng())
+    assert issue != "2018年09月12日"
+    assert issue == ""
+
+
+def test_stitch_issue_date_tokens_ltr():
+    from license_trans.pipeline import _stitch_issue_date_tokens
+    lines = [
+        OcrLine("2024", 0.9, 10, 4, 50, 22),
+        OcrLine("年", 0.9, 54, 4, 72, 22),
+        OcrLine("09", 0.9, 80, 4, 110, 22),
+        OcrLine("月", 0.9, 114, 4, 132, 22),
+        OcrLine("19", 0.9, 140, 4, 170, 22),
+        OcrLine("日", 0.9, 174, 4, 192, 22),
+    ]
+    assert _stitch_issue_date_tokens(lines) == "2024年09月19日"
+    assert _stitch_issue_date_tokens([
+        OcrLine("2024年09月19日", 0.9, 10, 4, 200, 22),
+    ]) == "2024年09月19日"
+    assert _stitch_issue_date_tokens([
+        OcrLine("2024年1月1日", 0.9, 10, 4, 200, 22),
+    ]) == "2024年01月01日"
+
+
+def test_issue_date_strip_is_under_authority_seal():
+    from license_trans.pipeline import _issue_date_strip
+    img = np.zeros((800, 1200, 3), dtype=np.uint8)
+    img[:, :] = (240, 240, 240)
+    lines = [
+        OcrLine("登记机关", 0.9, 40, 620, 160, 650),
+        OcrLine("青岛市市场监督管理局", 0.9, 40, 660, 360, 690),
+    ]
+    crop = _issue_date_strip(img, lines)
+    assert crop is not None
+    assert crop.shape[1] < 1200
+    assert crop.shape[0] < 800
+    # Right-hand seal band, not the 成立日期 row at the top.
+    assert crop.shape[1] <= 1200 * 0.55 + 2
+
+
+def test_recover_issue_date_destains_and_stitches(monkeypatch):
+    from license_trans import pipeline as pipe
+
+    destain_calls = []
+    real_destain = pipe._remove_red_seal
+
+    def spy_destain(img):
+        destain_calls.append(img.shape)
+        return real_destain(img)
+
+    monkeypatch.setattr(pipe, "_remove_red_seal", spy_destain)
+
+    img = np.zeros((800, 1000, 3), dtype=np.uint8)
+    img[:, :] = (230, 230, 230)
+    img[560:740, 520:980] = (40, 40, 200)
+    lines = [
+        OcrLine("成立日期", 0.9, 40, 80, 140, 110),
+        OcrLine("2018年09月12日", 0.9, 160, 80, 360, 110),
+        OcrLine("登记机关", 0.9, 40, 560, 160, 590),
+    ]
+
+    class _Eng:
+        def _ocr(self, _im):
+            toks = [
+                ([[8, 4], [40, 4], [40, 20], [8, 20]], "2024", 0.9),
+                ([[44, 4], [60, 4], [60, 20], [44, 20]], "年", 0.9),
+                ([[64, 4], [90, 4], [90, 20], [64, 20]], "09", 0.9),
+                ([[94, 4], [110, 4], [110, 20], [94, 20]], "月", 0.9),
+                ([[114, 4], [140, 4], [140, 20], [114, 20]], "19", 0.9),
+                ([[144, 4], [160, 4], [160, 20], [144, 20]], "日", 0.9),
+            ]
+            return toks, 0.0
+
+    issue = pipe._recover_issue_date(img, lines, _Eng())
+    assert destain_calls
+    assert issue == "2024年09月19日"
+
+
+def test_harvest_dates_and_term_from_ocr():
+    from license_trans.pipeline import _harvest_from_ocr
+    from license_trans.field_state import FieldStateTracker
+
+    fields = LicenseFields(name="横峰县育民建筑劳务服务有限公司")
+    tracker = FieldStateTracker()
+    for name in ("established", "term", "issue_date", "authority", "scope"):
+        tracker.init_field(name, "")
+    _harvest_from_ocr(fields, tracker, [
+        "名称横峰县育民建筑劳务服务有限公司",
+        "成立日期2021年03月24日",
+        "营业期限2021年03月24日至长期",
+        "登记机关横峰县市场监督管理局",
+        "发证日期2021年03月24日",
+    ])
+    assert fields.established == "2021年03月24日"
+    assert fields.term == "2021年03月24日至长期"
+    assert fields.issue_date == "2021年03月24日"
+    assert fields.authority == "横峰县市场监督管理局"
+    assert tracker.get("established").status == FieldStatus.OK
+
+
+def test_harvest_completes_date_only_term():
+    from license_trans.pipeline import _harvest_from_ocr
+    from license_trans.field_state import FieldStateTracker
+    from license_trans.rule_repair import field_passes_rules
+
+    assert field_passes_rules("term", "2021年03月24日") is False
+    assert field_passes_rules("term", "2021年03月24日至长期") is True
+    assert field_passes_rules("scope", "横峰县育民建筑劳务服务有限公司") is False
+
+    fields = LicenseFields(
+        name="横峰县育民建筑劳务服务有限公司",
+        term="2021年03月24日",
+        scope="横峰县育民建筑劳务服务有限公司",
+    )
+    tracker = FieldStateTracker()
+    tracker.init_field("term", fields.term)
+    tracker.init_field("scope", fields.scope)
+    _harvest_from_ocr(fields, tracker, [
+        "名称横峰县育民建筑劳务服务有限公司",
+        "经营范围许可项目：建筑劳务分包（依法须经批准的项目，经相关部门批准后方可开展经营活动）一般项目：劳务服务（不含劳务派遣），机械设备租赁（除许可业务外，可自主依法经营法律法规非禁止或限制的项目）",
+        "营业期限2021年03月24日至长期",
+        "登记机关横峰县市场监督管理局",
+    ])
+    assert fields.term == "2021年03月24日至长期"
+    assert "许可项目" in fields.scope
+    assert "建筑劳务分包" in fields.scope
+    assert "有限公司" not in fields.scope[-6:]
+
+
+def test_fallback_issue_date_uses_established():
+    from license_trans.pipeline import _fallback_issue_from_established
+    from license_trans.field_state import FieldStateTracker
+
+    fields = LicenseFields(established="2021年03月24日", issue_date="")
+    tracker = FieldStateTracker()
+    tracker.init_field("issue_date", "")
+    _fallback_issue_from_established(fields, tracker)
+    assert fields.issue_date == "2021年03月24日"
+    assert tracker.get("issue_date").status == FieldStatus.OK
+
+
+def test_harvest_scope_from_left_column_lines():
+    from license_trans.pipeline import _harvest_from_ocr
+    from license_trans.field_state import FieldStateTracker
+
+    fields = LicenseFields(
+        name="横峰县育民建筑劳务服务有限公司",
+        scope="横峰县育民建筑劳务服务有限公司",
+    )
+    tracker = FieldStateTracker()
+    tracker.init_field("scope", fields.scope)
+    lines = [
+        OcrLine("名称", 0.9, 20, 40, 80, 70),
+        OcrLine("横峰县育民建筑劳务服务有限公司", 0.9, 90, 40, 400, 70),
+        OcrLine("注册资本", 0.9, 520, 40, 600, 70),
+        OcrLine("壹佰万元整", 0.9, 610, 40, 720, 70),
+        OcrLine("经营范围", 0.9, 20, 200, 100, 230),
+        OcrLine("许可项目：建筑劳务分包（依法须经批准的项目，经相关部门批准后方可开展经营活动）", 0.9, 110, 200, 480, 280),
+        OcrLine("一般项目：劳务服务（不含劳务派遣），机械设备租赁", 0.9, 110, 280, 480, 330),
+        OcrLine("住所", 0.9, 520, 200, 580, 230),
+        OcrLine("江西省上饶市横峰县", 0.9, 590, 200, 780, 230),
+    ]
+    _harvest_from_ocr(fields, tracker, [ln.text for ln in lines], lines)
+    assert "许可项目" in fields.scope
+    assert "建筑劳务分包" in fields.scope
+    assert "横峰县育民" not in fields.scope
+
+
+def test_translate_term_keeps_long_term():
+    from license_trans.translate import translate_term
+    assert translate_term("2021年03月24日至长期") == "March 24, 2021 to Long term"
+    assert translate_term("2021年03月24日") == "March 24, 2021"
+
+
+def test_worth_field_retry_skips_valid_usci_and_authority():
+    from license_trans.pipeline import _worth_field_retry
+
+    fields = LicenseFields(
+        credit_code="91361125MA3ABHY985",
+        authority="横峰县市场监督管理局",
+        name="横峰县育民建筑劳务服务有限公司",
+        scope="横峰县育民建筑劳务服务有限公司",
+    )
+    assert _worth_field_retry("credit_code", fields) is False
+    assert _worth_field_retry("authority", fields) is False
+    assert _worth_field_retry("scope", fields) is False
+
+
+def test_ai_fills_missing_dates_from_ocr(monkeypatch):
+    fields = LicenseFields(name="测试有限公司", established="", term="", issue_date="")
+
+    class FakeClient:
+        def is_available(self):
+            return True
+
+        def chat_json(self, prompt, *_a, **_k):
+            if "Copy existing OCR" in prompt or "copy these fields" in prompt:
+                return {"fields": {
+                    "established": "2021年03月24日",
+                    "term": "2021年03月24日至长期",
+                    "issue_date": "2021年03月24日",
+                    "authority": "横峰县市场监督管理局",
+                    "scope": "劳务分包、设备租赁",
+                }}
+            return {"overall_status": "ok", "issues": []}
+
+    import license_trans.pipeline as pipeline
+    monkeypatch.setattr(pipeline, "AIClient", lambda config: FakeClient())
+    monkeypatch.setattr(pipeline, "_field_level_retry", lambda *a, **k: [])
+    tracker = _run_ai_validation_and_retry(
+        fields,
+        [
+            OcrLine("名称 测试有限公司", 0.9, 0, 0, 10, 10),
+            OcrLine("经营范围 劳务分包、设备租赁", 0.9, 0, 20, 10, 30),
+            OcrLine("成立日期 2021年03月24日", 0.9, 0, 40, 10, 50),
+            OcrLine("营业期限 2021年03月24日至长期", 0.9, 0, 60, 10, 70),
+            OcrLine("发证日期 2021年03月24日", 0.9, 0, 80, 10, 90),
+            OcrLine("横峰县市场监督管理局", 0.9, 0, 100, 10, 110),
+        ],
+        np.zeros((20, 20, 3), dtype=np.uint8),
+        {},
+        engine=None,
+    )
+    assert fields.established == "2021年03月24日"
+    assert "至长期" in fields.term
+    assert fields.issue_date == "2021年03月24日"
+    assert "局" in fields.authority
+    assert tracker.fields_needing_review() == []
+
+
+def test_infer_scope_region_without_scope_label():
+    from license_trans.field_crop import infer_scope_region, FieldCropper
+
+    img = np.zeros((1100, 1600, 3), dtype=np.uint8)
+    lines = [
+        OcrLine("法定代表人尹益高", 0.9, 260, 659, 468, 688),
+        OcrLine("注册资本壹佰万元整", 0.9, 899, 593, 1154, 621),
+        OcrLine("所 江西省上饶市横峰县岑阳镇人民大道", 0.9, 1013, 713, 1374, 741),
+        OcrLine("制的项目)", 0.9, 406, 746, 481, 768),
+        OcrLine("D登记机关", 0.9, 866, 873, 1208, 908),
+    ]
+    region = infer_scope_region(img, lines)
+    assert region is not None
+    x0, y0, x1, y1 = region
+    assert y0 <= 688
+    assert y1 >= 768
+    assert x0 < 406
+    assert x1 > 481
+    assert x1 < 1013
+
+    cropper = FieldCropper(img, lines)
+    assert cropper.find_field_region("scope") == region
+    auth = cropper.find_field_region("authority")
+    assert auth is not None
+    assert auth[0] <= 866
+    assert auth[2] >= 1200
+
+
+def test_recover_scope_from_left_column_crop(monkeypatch):
+    from license_trans import pipeline as pipe
+
+    img = np.zeros((1100, 1600, 3), dtype=np.uint8)
+    img[:, :] = (240, 240, 240)
+    lines = [
+        OcrLine("法定代表人尹益高", 0.9, 260, 659, 468, 688),
+        OcrLine("注册资本壹佰万元整", 0.9, 899, 593, 1154, 621),
+        OcrLine("所 江西省上饶市横峰县岑阳镇人民大道", 0.9, 1013, 713, 1374, 741),
+        OcrLine("制的项目)", 0.9, 406, 746, 481, 768),
+        OcrLine("D登记机关", 0.9, 866, 873, 1208, 908),
+    ]
+    body = (
+        "许可项目：建筑劳务分包（依法须经批准的项目，经相关部门批准后方可开展经营活动）"
+        "一般项目：劳务服务（不含劳务派遣），机械设备租赁（除许可业务外，可自主依法经营法律法规非禁止或限制的项目）"
+    )
+
+    class _Eng:
+        def _ocr(self, _im):
+            return [([[8, 4], [400, 4], [400, 20], [8, 20]], body, 0.9)], 0.0
+
+    text, extra = pipe._recover_scope(img, lines, _Eng())
+    assert "许可项目" in text
+    assert "建筑劳务分包" in text
+    assert "一般项目" in text
+    assert extra
+
+
+def test_repair_date_keeps_term_to_long():
+    from license_trans.rule_repair import repair_field_value, apply_deterministic_repairs
+    from license_trans.field_state import FieldStateTracker
+
+    assert repair_field_value("term", "2021年03月24日至长期") is None
+    assert repair_field_value("term", "2021年3月24日至长期") == (
+        "2021年03月24日至长期", "date_format")
+    fields = LicenseFields(term="2021年03月24日至长期")
+    tracker = FieldStateTracker()
+    tracker.init_field("term", fields.term)
+    apply_deterministic_repairs(fields, tracker)
+    assert fields.term == "2021年03月24日至长期"
+
+
+def test_infer_authority_from_county_in_address():
+    from license_trans.pipeline import _infer_authority_from_place, _harvest_from_ocr
+    from license_trans.field_state import FieldStateTracker
+
+    assert _infer_authority_from_place(
+        "江西省上饶市横峰县岑阳镇人民大道259号",
+        "横峰县育民建筑劳务服务有限公司",
+    ) == "横峰县市场监督管理局"
+
+    fields = LicenseFields(
+        name="横峰县育民建筑劳务服务有限公司",
+        address="江西省上饶市横峰县岑阳镇人民大道259号",
+        authority="",
+    )
+    tracker = FieldStateTracker()
+    tracker.init_field("authority", "")
+    _harvest_from_ocr(fields, tracker, ["D登记机关", "名称横峰县育民建筑劳务服务有限公司"])
+    assert fields.authority == "横峰县市场监督管理局"

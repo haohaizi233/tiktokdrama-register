@@ -956,9 +956,14 @@ def translate_authority(text: str, address: str = '', name: str = '') -> str:
         en = str(en).replace(' City', '').replace(' Province', '').replace(' District', '').strip()
         return f'{en} {bureau} (Sealed)'
     hint = snap_text((address or "") + (name or ""))
-    for city in sorted((key for key in places if key.endswith("市") and len(key) >= 3), key=len, reverse=True):
-        if city in hint:
-            return translate_authority(city + "市场监督管理局")
+    for keys in (
+        [k for k in places if k.endswith(("自治县", "县")) and len(k) >= 3],
+        [k for k in places if k.endswith(("区", "旗")) and len(k) >= 3],
+        [k for k in places if k.endswith("市") and len(k) >= 3],
+    ):
+        for place in sorted(keys, key=len, reverse=True):
+            if place in hint:
+                return translate_authority(place + "市场监督管理局")
     return ""
 
 
@@ -969,6 +974,10 @@ def translate_fields(fields) -> dict:
     prefer = places_from_usci(data.get("credit_code") or "")
     address_en = translate_address(data.get("address") or "", prefer)
     scope = translate_scope(data.get('scope') or '')
+    if not scope:
+        zh_scope = (data.get("scope") or "").strip()
+        if zh_scope and any(k in zh_scope for k in ("项目", "分包", "销售", "租赁", "服务")):
+            scope = _api_translate(zh_scope) or scope
     leftover = re.findall(r"[\u4e00-\u9fff]+", scope)
     warnings = list(data.get("warnings") or [])
     if leftover:

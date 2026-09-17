@@ -307,6 +307,8 @@ def _fit_image_page(doc: fitz.Document, image_path: str | Path, oriented_bgr=Non
         page.insert_image(rect, stream=buf.tobytes())
         return
     with Image.open(image_path) as im:
+        from PIL import ImageOps
+        im = ImageOps.exif_transpose(im) or im
         im = im.convert("RGB")
         buf = io.BytesIO()
         im.save(buf, format="JPEG", quality=90)

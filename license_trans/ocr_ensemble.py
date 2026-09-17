@@ -6,6 +6,7 @@ crop, never a single OCR line.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -245,8 +246,18 @@ class OcrCandidateFusion:
                     score += 0.4
         if self._divisions and any(d and d in text for d in self._divisions if len(d) >= 2):
             score += 0.8
-        if field_name == "scope" and ("一般项目" in text or "许可项目" in text):
+        if field_name == "scope" and ("一般项目" in text or "许可项目" in text
+                                      or text.startswith("般项目")):
             score += 0.5
+        if field_name == "scope":
+            if re.search(r"(?:SC)?JDGL", text or "", re.I):
+                score -= 3.0
+            compact = _norm(text)
+            if compact.startswith("经营范") and not compact.startswith("经营范围"):
+                score -= 3.0
+            score += 0.12 * compact.count("销售")
+            if "依法自主开展经营" in compact:
+                score += 1.2
         if field_name == "name" and ("公司" in text or "厂" in text or "中心" in text):
             score += 0.3
         return score

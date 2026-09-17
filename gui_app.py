@@ -95,6 +95,61 @@ class App(tk.Tk):
         self.option_add("*Font", FONT)
         style.configure("TNotebook.Tab", padding=(18, 6), font=FONT)
 
+    def _build_api_key_slot(self):
+        """Fill the empty notebook tab-strip with the license AI key field."""
+        from license_gui import _read_ai_api_key
+
+        slot = ttk.Frame(self)
+        ttk.Label(slot, text="API Key").pack(side="left")
+        self.var_api_key = tk.StringVar(value=_read_ai_api_key())
+        self.ent_api_key = ttk.Entry(
+            slot, textvariable=self.var_api_key, width=28, show="*")
+        self.ent_api_key.pack(side="left", padx=(6, 0))
+        self.ent_api_key.bind("<Return>", lambda _e: self._save_api_key())
+        ttk.Button(slot, text="保存", command=self._save_api_key, width=6).pack(
+            side="left", padx=(6, 0))
+        self.lbl_api_key = ttk.Label(slot, text="", foreground="#888888")
+        self.lbl_api_key.pack(side="left", padx=(8, 0))
+        self._api_slot = slot
+        self._refresh_api_key_status()
+        self.nb.bind("<<NotebookTabChanged>>", self._place_api_key_slot, add="+")
+        self.nb.bind("<Configure>", self._place_api_key_slot, add="+")
+        self.after(0, self._place_api_key_slot)
+
+    def _place_api_key_slot(self, _event=None):
+        try:
+            on_license = self.nb.index("current") == self.nb.index(self.page_lic)
+        except tk.TclError:
+            return
+        if not on_license:
+            self._api_slot.place_forget()
+            return
+        self._api_slot.place(in_=self.nb, relx=1.0, x=-10, y=5, anchor="ne")
+        self._api_slot.lift()
+
+    def _refresh_api_key_status(self):
+        from license_gui import _read_ai_api_key
+        if _read_ai_api_key():
+            self.lbl_api_key.config(text="已配置", foreground="#0a7d32")
+        else:
+            self.lbl_api_key.config(text="未填写", foreground="#888888")
+
+    def _save_api_key(self):
+        from license_gui import _save_ai_api_key
+        key = self.var_api_key.get().strip()
+        try:
+            _save_ai_api_key(key)
+        except Exception as exc:
+            messagebox.showerror("执照翻译", f"API Key 保存失败: {exc}")
+            return
+        self.var_api_key.set(key)
+        self._refresh_api_key_status()
+        if hasattr(self, "page_lic") and hasattr(self.page_lic, "_append_log"):
+            if key:
+                self.page_lic._append_log("AI API Key 已保存，下次转换生效。", "ok")
+            else:
+                self.page_lic._append_log("AI API Key 已清空，转换为规则模式。", "warn")
+
     def _build_ui(self):
         self.nb = ttk.Notebook(self)
         self.nb.pack(fill="both", expand=True, padx=6, pady=(6, 8))
@@ -102,6 +157,7 @@ class App(tk.Tk):
         self.nb.add(self.page_reg, text="  短剧注册  ")
         self.page_lic = LicensePage(self.nb)
         self.nb.add(self.page_lic, text="  执照翻译  ")
+        self._build_api_key_slot()
 
         # ① 导入区
         f1 = ttk.LabelFrame(self.page_reg, text=" ① 导入账号(选txt文件 或 粘贴文本) ")

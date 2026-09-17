@@ -40,6 +40,17 @@ def _repair_date(text: str) -> tuple[str, str] | None:
     m = DATE_RE.search(raw)
     if m:
         fixed = f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日"
+        rest = raw[m.end():]
+        if "长期" in raw:
+            term = f"{fixed}至长期"
+            return (term, "date_format") if term != raw else None
+        if "至" in rest:
+            m2 = DATE_RE.search(rest)
+            if not m2:
+                return None
+            end = f"{int(m2.group(1)):04d}年{int(m2.group(2)):02d}月{int(m2.group(3)):02d}日"
+            term = f"{fixed}至{end}"
+            return (term, "date_format") if term != raw else None
         if fixed != raw:
             return fixed, "date_format"
         return None
@@ -134,8 +145,26 @@ def field_passes_rules(field: str, value: str) -> bool:
     if field in ("established", "issue_date"):
         return bool(DATE_RE.search(value) or _NUM_DATE_RE.fullmatch(value))
     if field == "scope":
-        labels = compact_is_label(value, "经营范围")
-        return (not labels) and len(value) >= 2
+        t = re.sub(r"[\s\u3000：:]+", "", value)
+        if compact_is_label(value, "经营范围") or len(t) < 4:
+            return False
+        if t.startswith("经营范") and not t.startswith("经营范围"):
+            return False
+        if re.search(r"(?:SC)?JDGL", value, re.I):
+            return False
+        if any(k in t for k in ("法定代表人", "成立日期", "注册资本", "统一社会信用")):
+            return False
+        # Company name stuffed into 经营范围 (Hengfeng: parse grabbed 名称).
+        if re.search(r"(有限责任公司|有限公司|股份有限公司)$", t) and "项目" not in t:
+            return False
+        return True
+    if field == "authority":
+        return "局" in value and "监制" not in value and len(value) >= 4
+    if field == "term":
+        if "长期" in value:
+            return True
+        dates = DATE_RE.findall(value)
+        return "至" in value and len(dates) >= 2
     if field in ("name", "address", "legal_person"):
         return len(value) >= 2 and value not in ("名称", "住所", "地址", "法定代表人")
     return True

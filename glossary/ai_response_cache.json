@@ -1,0 +1,1187 @@
+{
+  "0f88617dc507c69e03fba6c7c18fe7292ad7de76e655f06f22dc503e336d3137": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "般项目",
+        "reason": "经营范围开头疑似漏识“一”字，应为“一般项目”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "水泥制品销",
+        "reason": "疑似截断，应为“水泥制品销售”",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "日用百货销",
+        "reason": "疑似截断，应为“日用百货销售”",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "装印搬运",
+        "reason": "疑似识别错误，常见表述为“装卸搬运”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "上石方工程施工",
+        "reason": "疑似识别错误，常见表述为“土石方工程施工”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "凭营业执照依法自主开展经营活",
+        "reason": "固定表述疑似截断，应为“凭营业执照依法自主开展经营活动”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "scope_truncation",
+        "fragment": "",
+        "reason": "经营范围结尾不完整，缺少“动”字及可能的后续内容",
+        "confidence": 0.85,
+        "action": "needs_review"
+      },
+      {
+        "field": "address",
+        "type": "suspected_ocr_error",
+        "fragment": "红石崖街道团结路2879号",
+        "reason": "原始OCR中为“红石崖街道办事处团结路2879号”，解析结果漏“办事处”",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "term",
+        "type": "missing_field",
+        "fragment": "",
+        "reason": "营业期限字段为空，规则引擎已警告",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "missing_field",
+        "fragment": "",
+        "reason": "登记机关字段为空，规则引擎已警告",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_anomaly",
+        "fragment": "2018年09月12日",
+        "reason": "成立日期与发照日期完全相同，可能为OCR误读或字段错位",
+        "confidence": 0.6,
+        "action": "needs_review"
+      }
+    ]
+  },
+  "7decd1f8cdb31bbc5c7f663476cf9dd507edbe6a6fa9b7173d875e7dcbe35841": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "般项目",
+        "reason": "经营范围开头疑似缺失“一”字，应为“一般项目”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "木材售",
+        "reason": "疑似“木材销售”漏字，与上下文销售类目不符",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "橡胶制品销售售",
+        "reason": "疑似“橡胶制品销售”后多出“售”字，重复字符",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "园林绿化工程售",
+        "reason": "疑似“园林绿化工程施工”漏“施工”且多“售”字",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "土石方工程施工工",
+        "reason": "疑似“土石方工程施工”后多出“工”字，重复字符",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "凭营业执照依动",
+        "reason": "固定表述疑似识别错误，应为“凭营业执照依法自主开展经营活动”",
+        "confidence": 0.95,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_truncation",
+        "fragment": "凭营业执照依动）",
+        "reason": "经营范围结尾括号不完整，疑似截断，缺少“经营活动”等结尾内容",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "装印搬运",
+        "reason": "疑似“装卸搬运”识别错误",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "上石方工程施工",
+        "reason": "疑似“土石方工程施工”识别错误",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "水泥制品销",
+        "reason": "疑似“水泥制品销售”漏字",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "日用百货销",
+        "reason": "疑似“日用百货销售”漏字",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "金属门窗工程施工",
+        "reason": "原始OCR中存在但解析结果缺失，疑似解析遗漏",
+        "confidence": 0.7,
+        "action": "needs_review"
+      },
+      {
+        "field": "address",
+        "type": "suspected_ocr_error",
+        "fragment": "红石崖街道团结路2879号",
+        "reason": "原始OCR为“红石崖街道办事处团结路2879号”，解析结果缺失“办事处”",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "term",
+        "type": "missing_field",
+        "fragment": "",
+        "reason": "营业期限字段为空，原始OCR中未识别到",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "missing_field",
+        "fragment": "",
+        "reason": "登记机关字段为空，原始OCR中未识别到",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_anomaly",
+        "fragment": "2018年09月12日",
+        "reason": "成立日期与发照日期相同，可能为正常情况，但需人工确认",
+        "confidence": 0.5,
+        "action": "needs_review"
+      }
+    ]
+  },
+  "495ee5725a105023a54dc8dbb9bf0c9ed20b9fba8413dc62c6ccd2e551fc7fdd": {
+    "translation": "general items"
+  },
+  "1bb3dac5f3d312b1c465fd5d07e9c65243b0c792dba9169bc036d012169e51cd": {
+    "translation": "sell"
+  },
+  "fb190c68332faf0cca7d48242fd2be2712a683bbcca05627825bb1b60cd772f0": {
+    "translation": "Garden"
+  },
+  "cafaa24b472f140113d7fc92bf689814caacf2dfae92d663be34bfb750ce61a7": {
+    "translation": "Landscaping"
+  },
+  "f763ef003b4f610d65ae284e873142bf6e22238b080185a1bd0174f23ef8ccc1": {
+    "translation": "work"
+  },
+  "fd2f0837eda6c93872c7c3a39dffb8bb3ee5649fa2c57de1dcbe65b9ccbea8c6": {
+    "translation": "Subject to the business license, conduct [activities]"
+  },
+  "0849758587c5d646c383a578bab50a1bc7bf430125b2f5b9536170acc3c5bc6d": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "untranslated_chinese",
+        "chinese": "般项目：建筑材料销售：金属材料销售：木材售：阀门和旋塞销售：轴承销售：橡胶制品销售售：日用品批发：机械设备租赁：园林绿化工程售：工程管理服务：装卸搬运：土石方工程施工工。（除依法须经批准的项目外，凭营业执照依动）",
+        "english": "general items; sales of building materials; sales of metal materials; timbersell; sales of valves and cocks; sales of bearings; rubber products salessell; wholesale of daily goods; leasing of machinery and equipment; Garden forestLandscaping engineeringsell; project management services; loading and handling; earthwork constructionwork; except for items subject to approval in accordance with the law; Subject to the business license, conduct [activities]",
+        "reason": "Source scope text appears corrupted/truncated (e.g. '般项目' missing '一', '木材售', '销售售', '工程售', '施工工', '依动'). Translation contains concatenated artifacts ('timbersell', 'salessell', 'engineeringsell', 'constructionwork') and capitalized mid-sentence terms. The closing clause is incomplete ('conduct [activities]').",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "term_error",
+        "chinese": "阀门和旋塞销售",
+        "english": "sales of valves and cocks",
+        "reason": "'旋塞' in industrial context is typically 'plug valve' or 'cock valve'; 'cocks' alone is ambiguous and non-standard in business scope translation.",
+        "confidence": 0.7,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "term_error",
+        "chinese": "园林绿化工程",
+        "english": "Garden forestLandscaping engineering",
+        "reason": "Standard translation is 'landscaping engineering' or 'garden greening engineering'. 'Garden forestLandscaping' is malformed and incorrectly capitalized.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "term_error",
+        "chinese": "土石方工程施工",
+        "english": "earthwork constructionwork",
+        "reason": "Should be 'earthwork construction' or 'earthwork engineering construction'. 'constructionwork' is a concatenation artifact.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "term_error",
+        "chinese": "日用品批发",
+        "english": "wholesale of daily goods",
+        "reason": "Standard business scope term is 'wholesale of daily necessities' or 'daily-use products'.",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "source_mismatch",
+        "chinese": "",
+        "english": "Qingdao Municipal Market Supervision and Administration Bureau (Sealed)",
+        "reason": "Source authority field is empty but English contains a value. The authority name is plausible for Qingdao but cannot be verified against source; also '(Sealed)' is an annotation not part of the official name.",
+        "confidence": 0.85,
+        "action": "web_verify"
+      },
+      {
+        "field": "address",
+        "type": "place_name_check",
+        "chinese": "山东省青岛市黄岛区红石崖街道团结路2879号",
+        "english": "No. 2879, Tuanjie Road, Hongshiya Subdistrict, Huangdao District, Qingdao City, Shandong Province",
+        "reason": "Address order and structure are correct (smallest-to-largest). 'Hongshiya' is the standard pinyin for 红石崖. Recommend verifying 'Tuanjie Road' vs 'Tuanjie Lu' convention and subdistrict naming against official sources.",
+        "confidence": 0.75,
+        "action": "web_verify"
+      },
+      {
+        "field": "name",
+        "type": "company_name_check",
+        "chinese": "青岛宏科达贸易有限公司",
+        "english": "Qingdao Hongkeda Trading Co., Ltd.",
+        "reason": "Naming convention is correct (place + trade name + industry + company type). 'Hongkeda' pinyin is acceptable; verify against any registered English name.",
+        "confidence": 0.8,
+        "action": "web_verify"
+      },
+      {
+        "field": "type",
+        "type": "term_check",
+        "chinese": "有限责任公司(自然人独资)",
+        "english": "Limited Liability Company (Sole Proprietorship of Natural Person)",
+        "reason": "Standard rendering is 'Limited Liability Company (Sole Proprietorship by a Natural Person)' or 'Wholly-owned by a Natural Person'. Current phrasing is acceptable but slightly non-standard.",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "capital",
+        "type": "format_check",
+        "chinese": "贰佰万元整",
+        "english": "CNY Two Million Only",
+        "reason": "Format is acceptable. Consider 'RMB 2,000,000.00' or 'CNY 2,000,000' for consistency with financial documents.",
+        "confidence": 0.5,
+        "action": "pass"
+      },
+      {
+        "field": "established",
+        "type": "date_format_check",
+        "chinese": "2018年09月12日",
+        "english": "September 12, 2018",
+        "reason": "Date format is correct.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_format_check",
+        "chinese": "2018年09月12日",
+        "english": "September 12, 2018",
+        "reason": "Date format is correct.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "legal_person",
+        "type": "name_check",
+        "chinese": "管慎岗",
+        "english": "Guan Shengang",
+        "reason": "Pinyin romanization appears correct.",
+        "confidence": 0.9,
+        "action": "pass"
+      }
+    ]
+  },
+  "7849ccb763dfd79f9cad2f1ea45d851eca710d2328d1f7c101ae239e9dfe6d73": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "经营范般项日",
+        "reason": "固定表述“经营范围”及“一般项目”疑似识别错误",
+        "confidence": 0.95,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "木材售",
+        "reason": "疑似漏字，应为“木材销售”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "橡胶制品销售:售",
+        "reason": "疑似漏字或重复，应为“橡胶制品销售:...”",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "园林绿化工程W",
+        "reason": "疑似识别错误，应为“园林绿化工程施工”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "士石方工程施工",
+        "reason": "疑似识别错误，应为“土石方工程施工”",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "suspected_ocr_error",
+        "fragment": "凭营业执照依动)CJDGL",
+        "reason": "固定表述“凭营业执照依法自主开展经营活动”疑似截断及识别错误",
+        "confidence": 0.95,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "scope",
+        "type": "scope_truncation",
+        "fragment": "凭营业执照依动)CJDGL",
+        "reason": "经营范围结尾不完整，疑似截断",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "term",
+        "type": "missing_field",
+        "fragment": "",
+        "reason": "营业期限字段为空，可能未识别或缺失",
+        "confidence": 0.8,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "missing_field",
+        "fragment": "",
+        "reason": "登记机关字段为空，可能未识别或缺失",
+        "confidence": 0.8,
+        "action": "needs_review"
+      },
+      {
+        "field": "address",
+        "type": "suspected_ocr_error",
+        "fragment": "红石崖街道团结路2879号",
+        "reason": "原始OCR中地址顺序为“红石崖街道办事处团结路2879号”，解析结果可能漏字或顺序异常",
+        "confidence": 0.7,
+        "action": "retry_ocr"
+      }
+    ]
+  },
+  "42e8a7a9adf0e7512d77364891026e4f69b48972bada7520407aff17c92f69a6": {
+    "translation": "Fanban Project"
+  },
+  "8671c7942b397a9cf1436a6cf50917ef0941446b253e03abffb0c48cb8a536ee": {
+    "translation": "Earthwork"
+  },
+  "9c4f343c2fc1263de1a8cac3299231c6c48708e764d877f137740fa9db97509d": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "untranslated_chinese",
+        "chinese": "经营范般项日",
+        "english": "construction of operationFanban Project",
+        "reason": "Source text appears to be OCR-garbled ('经营范般项日' instead of '经营范围项目'), and the English translation contains garbled fragments ('Fanban Project') that do not correspond to any Chinese term. The scope field is severely corrupted and requires human review.",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "untranslated_chinese",
+        "chinese": "木材售",
+        "english": "timbersell",
+        "reason": "Concatenated untranslated fragment; likely '木材销售' (timber sales) with missing character. English 'timbersell' is not valid English.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "untranslated_chinese",
+        "chinese": "园林绿化工程W",
+        "english": "Garden forestLandscaping engineeringW",
+        "reason": "Stray Latin character 'W' retained from source and 'Garden forestLandscaping' is malformed. Should be 'landscaping/garden greening engineering'.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "untranslated_chinese",
+        "chinese": "士石方工程施工",
+        "english": "Earthwork",
+        "reason": "Source '士石方' is an OCR error for '土石方' (earthwork). Translation omits '工程施工' (engineering construction).",
+        "confidence": 0.85,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "untranslated_chinese",
+        "chinese": "凭营业执照依动)CJDGL",
+        "english": "Subject to the business license, conduct [activities]",
+        "reason": "Trailing Latin garbage 'CJDGL' from source is dropped, and '依动' is likely OCR error for '依法' (in accordance with law). Standard closing clause is '依法须经批准的项目，经相关部门批准后方可开展经营活动'.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "formatting_error",
+        "chinese": "：",
+        "english": ":",
+        "reason": "Chinese full-width colons used as list separators in source were rendered as ASCII colons in English, producing run-on text. Scope items should be separated by semicolons or commas.",
+        "confidence": 0.8,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "source_mismatch",
+        "chinese": "",
+        "english": "Qingdao Municipal Market Supervision and Administration Bureau (Sealed)",
+        "reason": "Source authority field is empty but English contains an inferred issuing authority. This is an inference not present in the source and should be verified against the actual license seal.",
+        "confidence": 0.85,
+        "action": "web_verify"
+      },
+      {
+        "field": "type",
+        "type": "term_translation",
+        "chinese": "有限责任公司(自然人独资)",
+        "english": "Limited Liability Company (Sole Proprietorship of Natural Person)",
+        "reason": "Standard rendering is 'Limited Liability Company (Sole Proprietorship by a Natural Person)' or 'One-Person Limited Liability Company (Natural Person)'. 'Sole Proprietorship' alone can be confused with 个人独资企业, a different entity type.",
+        "confidence": 0.7,
+        "action": "web_verify"
+      },
+      {
+        "field": "capital",
+        "type": "formatting_error",
+        "chinese": "贰佰万元整",
+        "english": "CNY Two Million Only",
+        "reason": "Standard financial rendering is 'RMB 2,000,000.00 (SAY TWO MILLION YUAN ONLY)' or 'CNY 2,000,000'. Numeric form is preferred for registered capital.",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "address",
+        "type": "place_name_check",
+        "chinese": "山东省青岛市黄岛区红石崖街道团结路2879号",
+        "english": "No. 2879, Tuanjie Road, Hongshiya Subdistrict, Huangdao District, Qingdao City, Shandong Province",
+        "reason": "Address order and pinyin appear correct. 'Hongshiya' is the standard pinyin for 红石崖. Recommend confirming 'Subdistrict' vs 'Street Office' convention used by Qingdao authorities.",
+        "confidence": 0.75,
+        "action": "web_verify"
+      },
+      {
+        "field": "name",
+        "type": "company_name_check",
+        "chinese": "青岛宏科达贸易有限公司",
+        "english": "Qingdao Hongkeda Trading Co., Ltd.",
+        "reason": "Naming convention follows standard form (City + Pinyin + Industry + Co., Ltd.). 'Hongkeda' pinyin is plausible for 宏科达.",
+        "confidence": 0.9,
+        "action": "pass"
+      },
+      {
+        "field": "legal_person",
+        "type": "name_check",
+        "chinese": "管慎岗",
+        "english": "Guan Shengang",
+        "reason": "Pinyin rendering is consistent with standard Mandarin romanization.",
+        "confidence": 0.9,
+        "action": "pass"
+      },
+      {
+        "field": "established",
+        "type": "date_format",
+        "chinese": "2018年09月12日",
+        "english": "September 12, 2018",
+        "reason": "Date format is correct and unambiguous.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_format",
+        "chinese": "2018年09月12日",
+        "english": "September 12, 2018",
+        "reason": "Date format is correct and unambiguous.",
+        "confidence": 0.95,
+        "action": "pass"
+      }
+    ]
+  },
+  "a68f5576d1653db310fb2ada45a9ecba41decebc4c077a64889fcec87a03d221": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "field_misplacement",
+        "fragment": "横峰县育民建筑劳务服务有限公司",
+        "reason": "经营范围字段内容与公司名称完全相同，疑似将名称误填入经营范围，实际经营范围缺失",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "scope_truncation",
+        "fragment": "",
+        "reason": "经营范围为空或仅含公司名称，未识别到实际经营范围内容",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "credit_code",
+        "type": "suspected_ocr_error",
+        "fragment": "91361125MA3ABHY985",
+        "reason": "统一社会信用代码校验和警告，可能存在字符识别错误",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "term",
+        "type": "suspected_ocr_error",
+        "fragment": "",
+        "reason": "经营期限字段为空，但原始文本中存在“2021年03月24日至长期”，疑似字段未正确解析",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "authority",
+        "type": "suspected_ocr_error",
+        "fragment": "",
+        "reason": "登记机关字段为空，原始文本中仅见“登记机关”标签，未识别到具体机关名称",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "established",
+        "type": "date_anomaly",
+        "fragment": "2021年03月24日",
+        "reason": "成立日期与发照日期相同，且存在日期相关警告，需人工核对",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_anomaly",
+        "fragment": "2021年03月24日",
+        "reason": "发照日期与成立日期相同，且存在日期相关警告，需人工核对",
+        "confidence": 0.6,
+        "action": "needs_review"
+      }
+    ]
+  },
+  "1f476f6c8dd00f325b1746f28820ac53d2d03d823034927d682356f7ccd9c0b2": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "field_misplacement",
+        "fragment": "横峰县育民建筑劳务服务有限公司",
+        "reason": "经营范围字段内容与公司名称完全相同，疑似字段错位或经营范围未识别",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "scope_truncation",
+        "fragment": "",
+        "reason": "经营范围疑似缺失或被截断，原始OCR中未见经营范围正文",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "authority",
+        "type": "suspected_ocr_error",
+        "fragment": "2595",
+        "reason": "登记机关字段为数字，疑似将登记机关名称或地址中的编号误识别为机关名称",
+        "confidence": 0.85,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "term",
+        "type": "suspected_ocr_error",
+        "fragment": "",
+        "reason": "营业期限字段为空，但原始OCR显示“2021年03月24日至长期”，疑似未解析",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "established",
+        "type": "date_anomaly",
+        "fragment": "2021年03月24日",
+        "reason": "成立日期与发照日期相同，且规则引擎已提示日期异常，需人工核对",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_anomaly",
+        "fragment": "2021年03月24日",
+        "reason": "发照日期与成立日期相同，且规则引擎已提示日期异常，需人工核对",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "credit_code",
+        "type": "suspected_ocr_error",
+        "fragment": "91361125MA3ABHY985",
+        "reason": "统一社会信用代码校验失败，可能存在字符识别错误",
+        "confidence": 0.8,
+        "action": "retry_ocr"
+      }
+    ]
+  },
+  "3b608d2e82b352767afcd768c2da5e71ad4691a3d0c0154b4eb38bcdaae12054": {
+    "translation": "Hengfeng County Yumin"
+  },
+  "7dea438fc8470a879b602c1b3934c6a6344eb83fc2e835c94faa5d9af4198f34": {
+    "translation": "Co., Ltd."
+  },
+  "d036e66f0f4b459752284ef1b4971a6cb0b04500b1387e41f464a7791e028209": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "untranslated_or_corrupted_text",
+        "chinese": "横峰县育民建筑劳务服务有限公司",
+        "english": "Hengfeng County Yumin construction labor services servicesCo., Ltd.",
+        "reason": "The scope field contains corrupted text: 'services servicesCo.' has a duplicated word and a missing space before 'Co.'. The scope should be a business scope description, not the company name repeated. This appears to be a generation error.",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "scope_mismatch",
+        "chinese": "横峰县育民建筑劳务服务有限公司",
+        "english": "Hengfeng County Yumin construction labor services servicesCo., Ltd.",
+        "reason": "The Chinese source for scope is the company name itself, which is unusual. The English translation is a corrupted version of the company name rather than a business scope description. A human translator should verify the actual business scope from the original license.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "authority_code_unresolved",
+        "chinese": "2595",
+        "english": "Shangrao Municipal Market Supervision and Administration Bureau (Sealed)",
+        "reason": "The authority field source is a numeric code '2595' rather than a Chinese authority name. The English translation assumes it maps to Shangrao Municipal Market Supervision and Administration Bureau, but this mapping is not verifiable from the source. The '(Sealed)' suffix is also an editorial addition not present in the source.",
+        "confidence": 0.85,
+        "action": "web_verify"
+      },
+      {
+        "field": "address",
+        "type": "place_name_verification",
+        "chinese": "江西省上饶市横峰县岑阳镇人民大道",
+        "english": "Renmin Avenue, Cenyang Town, Hengfeng County, Shangrao City, Jiangxi Province",
+        "reason": "Address order is correctly smallest-to-largest. 'Cenyang Town' (岑阳镇) and 'Renmin Avenue' (人民大道) should be verified against official sources. 'Renmin' is the standard pinyin for 人民, but some official translations use 'Renmin' vs 'Ren Min'.",
+        "confidence": 0.7,
+        "action": "web_verify"
+      },
+      {
+        "field": "name",
+        "type": "company_name_convention",
+        "chinese": "横峰县育民建筑劳务服务有限公司",
+        "english": "Hengfeng County Yumin Construction Labor Services Co., Ltd.",
+        "reason": "Company name follows standard convention. 'Yumin' (育民) is correct pinyin. 'Construction Labor Services' is a reasonable translation of 建筑劳务服务. However, 'Labor' vs 'Labour' spelling should be consistent with the target market (US vs UK English).",
+        "confidence": 0.6,
+        "action": "pass"
+      },
+      {
+        "field": "type",
+        "type": "business_type_translation",
+        "chinese": "有限责任公司(自然人独资)",
+        "english": "Limited Liability Company (Sole Proprietorship of Natural Person)",
+        "reason": "The standard translation for 自然人独资 is typically 'Sole Proprietorship of Natural Person' or 'Wholly Owned by Natural Person'. This is acceptable but 'Sole Proprietorship' can be confused with 个人独资企业. Consider 'Limited Liability Company (Natural Person Sole Proprietorship)' for clarity.",
+        "confidence": 0.7,
+        "action": "pass"
+      },
+      {
+        "field": "capital",
+        "type": "capital_format",
+        "chinese": "壹佰万元整",
+        "english": "CNY One Million Only",
+        "reason": "Capital amount is correctly translated. 'CNY One Million Only' is acceptable. Some conventions use 'RMB 1,000,000' or 'CNY 1,000,000'. The 'Only' suffix (整) is correctly included.",
+        "confidence": 0.8,
+        "action": "pass"
+      },
+      {
+        "field": "established",
+        "type": "date_format",
+        "chinese": "2021年03月24日",
+        "english": "March 24, 2021",
+        "reason": "Date format is correct for US English convention.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_format",
+        "chinese": "2021年03月24日",
+        "english": "March 24, 2021",
+        "reason": "Date format is correct for US English convention.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "legal_person",
+        "type": "name_translation",
+        "chinese": "尹益高",
+        "english": "Yin Yigao",
+        "reason": "Pinyin translation of Chinese name is correct. Surname 'Yin' (尹) and given name 'Yigao' (益高) are properly formatted.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "credit_code",
+        "type": "credit_code_checksum",
+        "chinese": "91361125MA3ABHY985",
+        "english": "91361125MA3ABHY985",
+        "reason": "Credit code checksum warning is present in the warnings array. The code should be verified for validity.",
+        "confidence": 0.5,
+        "action": "web_verify"
+      }
+    ]
+  },
+  "50ffeb5394a1e4f41a9bcc1733cae012de111c03f463b32c6f1c8fcb6b874afd": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "scope_truncation",
+        "fragment": "",
+        "reason": "经营范围字段为空，原始OCR文本中仅出现“营”“制的项目)”等零散片段，疑似经营范围被截断或未识别",
+        "confidence": 0.95,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "type",
+        "type": "suspected_ocr_error",
+        "fragment": "型 有限责任公司(自然人独资)",
+        "reason": "公司类型字段包含多余前缀“型 ”，疑似“类型”标签被误并入字段值",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "authority",
+        "type": "suspected_ocr_error",
+        "fragment": "D登记机关",
+        "reason": "登记机关字段为空，原始OCR中“D登记机关”疑似“登记机关”标签被误识别，机关名称缺失",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "issue_date",
+        "type": "suspected_ocr_error",
+        "fragment": "年月日 2021 03",
+        "reason": "发照日期字段为空，原始OCR中仅识别出“年月日 2021 03”，日期不完整",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "address",
+        "type": "suspected_ocr_error",
+        "fragment": "所 江西省上饶市横峰县岑阳镇人民大道 259号",
+        "reason": "地址字段疑似包含“所”标签前缀，且原始OCR中地址被拆分为两段，需人工核对完整性",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "term",
+        "type": "suspected_ocr_error",
+        "fragment": "业 期限 2021年03月24日至长期",
+        "reason": "营业期限字段仅解析出起始日期，原始OCR中“至长期”未体现，疑似截断",
+        "confidence": 0.7,
+        "action": "needs_review"
+      }
+    ]
+  },
+  "231279cd1583e68b063aaaf8e9d070075acc0eb8fd6315e9cceb04b89f924ebf": {
+    "fields": {
+      "established": "2021年03月24日",
+      "term": "2021年03月24日至长期"
+    }
+  },
+  "b7118ffe538325e17536df5d7f10fb021e7c47fc5c5e74ab28d14efcd8d69b5b": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "authority",
+        "type": "untranslated_source",
+        "chinese": "",
+        "english": "Shangrao Municipal Market Supervision and Administration Bureau (Sealed)",
+        "reason": "The Chinese source for 'authority' is empty, but the English translation contains a fabricated authority name with '(Sealed)' added. This is not derived from the source and should be removed or verified against the original license.",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "type",
+        "type": "source_text_anomaly",
+        "chinese": "型 有限责任公司(自然人独资)",
+        "english": "Limited Liability Company (Wholly Owned by an Individual)",
+        "reason": "The Chinese source contains a stray leading character '型' (likely OCR artifact from '类型'). The English translation correctly omits it, but the source anomaly should be noted.",
+        "confidence": 0.8,
+        "action": "needs_review"
+      },
+      {
+        "field": "capital",
+        "type": "formatting",
+        "chinese": "壹佰万元整",
+        "english": "CNY One Million Only",
+        "reason": "Capital amount is acceptable but standard convention would be 'CNY 1,000,000' or 'RMB 1,000,000'. 'Only' is a literal rendering of '整' and is acceptable in formal contexts.",
+        "confidence": 0.6,
+        "action": "pass"
+      },
+      {
+        "field": "address",
+        "type": "place_name_check",
+        "chinese": "江西省上饶市横峰县岑阳镇人民大道259号",
+        "english": "No. 259, Renmin Avenue, Cenyang Town, Hengfeng County, Shangrao City, Jiangxi Province",
+        "reason": "Address order and place names (Jiangxi, Shangrao, Hengfeng, Cenyang) appear correct. 'Renmin Avenue' is a standard pinyin rendering of 人民大道.",
+        "confidence": 0.85,
+        "action": "pass"
+      },
+      {
+        "field": "name",
+        "type": "company_name_check",
+        "chinese": "横峰县育民建筑劳务服务有限公司",
+        "english": "Hengfeng County Yumin Construction Labor Services Co., Ltd.",
+        "reason": "Company name follows standard conventions. 'Yumin' is pinyin for 育民; 'Construction Labor Services' correctly renders 建筑劳务服务.",
+        "confidence": 0.9,
+        "action": "pass"
+      },
+      {
+        "field": "scope",
+        "type": "missing_translation",
+        "chinese": "",
+        "english": "",
+        "reason": "Business scope is empty in both source and translation. Flagged in warnings as 'scope' and 'en_scope_empty'. No action possible without source data.",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "issue_date",
+        "type": "missing_translation",
+        "chinese": "",
+        "english": "",
+        "reason": "Issue date is empty in both source and translation. Flagged in warnings. No action possible without source data.",
+        "confidence": 0.95,
+        "action": "needs_review"
+      }
+    ]
+  },
+  "2d483d14dba8e8f07287d6285b6e8838e7da3081e3bf2471437e07e26aff0e03": {
+    "fields": {
+      "established": "2021年03月24日",
+      "term": "2021年03月24日至长期"
+    }
+  },
+  "6b158bec9978e373ea144cb25f4a81cbd1fbb4935e5774c75a09ac8ef049b688": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "type",
+        "type": "untranslated_chinese",
+        "chinese": "型 有限责任公司(自然人独资)",
+        "english": "Limited Liability Company (Wholly Owned by an Individual)",
+        "reason": "The source contains a stray leading character '型' (likely OCR artifact from '类型'), which is not reflected in the English. The English translation itself is acceptable, but the source field appears corrupted and should be verified against the original document.",
+        "confidence": 0.7,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "hallucinated_content",
+        "chinese": "",
+        "english": "Shangrao Municipal Market Supervision and Administration Bureau (Sealed)",
+        "reason": "The Chinese source for 'authority' is empty, but the English contains a translated authority name with '(Sealed)'. This content is not present in the source and appears to be fabricated or carried over from another document. Must be removed or verified.",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "capital",
+        "type": "formatting_issue",
+        "chinese": "壹佰万元整",
+        "english": "CNY One Million Only",
+        "reason": "The Chinese '壹佰万元整' means 'One Million Yuan (exactly)'. The English omits 'Yuan' and uses 'Only' as a translation of '整'. Standard convention is 'RMB 1,000,000' or 'One Million Yuan'. The current rendering is ambiguous about the currency unit.",
+        "confidence": 0.8,
+        "action": "needs_review"
+      },
+      {
+        "field": "term",
+        "type": "formatting_issue",
+        "chinese": "2021年03月24日至长期",
+        "english": "March 24, 2021 to Long term",
+        "reason": "'至长期' should be rendered as 'to long-term' or 'to a long term' (lowercase, hyphenated). Capitalization of 'Long term' is inconsistent with standard English business document formatting.",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "address",
+        "type": "place_name_check",
+        "chinese": "江西省上饶市横峰县岑阳镇人民大道259号",
+        "english": "No. 259, Renmin Avenue, Cenyang Town, Hengfeng County, Shangrao City, Jiangxi Province",
+        "reason": "Place names appear correctly romanized (Hengfeng, Shangrao, Jiangxi, Cenyang). '人民大道' translated as 'Renmin Avenue' is acceptable. Address order is smallest-to-largest, which is standard for Chinese address translation. No error detected, but official verification of 'Cenyang Town' romanization is recommended.",
+        "confidence": 0.85,
+        "action": "web_verify"
+      },
+      {
+        "field": "name",
+        "type": "company_name_check",
+        "chinese": "横峰县育民建筑劳务服务有限公司",
+        "english": "Hengfeng County Yumin Construction Labor Services Co., Ltd.",
+        "reason": "Company name structure follows standard convention. '育民' romanized as 'Yumin' is acceptable. '建筑劳务服务' translated as 'Construction Labor Services' is reasonable. No error detected.",
+        "confidence": 0.9,
+        "action": "pass"
+      },
+      {
+        "field": "legal_person",
+        "type": "name_check",
+        "chinese": "尹益高",
+        "english": "Yin Yigao",
+        "reason": "Pinyin romanization of the legal representative's name is correct.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "established",
+        "type": "date_format_check",
+        "chinese": "2021年03月24日",
+        "english": "March 24, 2021",
+        "reason": "Date format is correct and follows standard English convention.",
+        "confidence": 0.95,
+        "action": "pass"
+      },
+      {
+        "field": "scope",
+        "type": "missing_content",
+        "chinese": "",
+        "english": "",
+        "reason": "Business scope is empty in both source and translation. This is flagged in warnings and may indicate incomplete data extraction.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      },
+      {
+        "field": "issue_date",
+        "type": "missing_content",
+        "chinese": "",
+        "english": "",
+        "reason": "Issue date is empty in both source and translation. This is flagged in warnings and may indicate incomplete data extraction.",
+        "confidence": 0.9,
+        "action": "needs_review"
+      }
+    ]
+  },
+  "dd28d16b353e81fdad7ed9d18c9c5fbeadf3657edd4160a29e6b091aedd2256f": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "scope",
+        "type": "missing_field",
+        "fragment": "",
+        "reason": "经营范围字段为空，原始OCR文本中仅出现疑似经营范围片段“制的项目)”，无法还原完整内容",
+        "confidence": 0.95,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "authority",
+        "type": "missing_field",
+        "fragment": "D登记机关",
+        "reason": "登记机关字段为空，原始OCR中登记机关名称疑似被识别为“D登记机关”，未提取到有效机关名称",
+        "confidence": 0.9,
+        "action": "retry_ocr"
+      },
+      {
+        "field": "type",
+        "type": "suspected_ocr_error",
+        "fragment": "型 有限责任公司(自然人独资)",
+        "reason": "公司类型字段包含多余前缀“型 ”，疑似“类型”标签被误并入字段值",
+        "confidence": 0.85,
+        "action": "needs_review"
+      },
+      {
+        "field": "issue_date",
+        "type": "date_anomaly",
+        "fragment": "年月日 2021 03",
+        "reason": "发照日期原始OCR仅识别到“2021”“03”，缺少具体日期，当前解析值2021年03月24日可能为推测填充",
+        "confidence": 0.8,
+        "action": "needs_review"
+      },
+      {
+        "field": "term",
+        "type": "suspected_ocr_error",
+        "fragment": "2021年03月24日至长期",
+        "reason": "营业期限原始文本为“2021年03月24日至长期”，解析结果仅保留起始日期，可能丢失“至长期”信息",
+        "confidence": 0.75,
+        "action": "needs_review"
+      },
+      {
+        "field": "address",
+        "type": "suspected_ocr_error",
+        "fragment": "所 江西省上饶市横峰县岑阳镇人民大道 / 259号",
+        "reason": "地址在原始OCR中被换行拆分为两段，且前缀“所”疑似“住所”标签残留，需确认地址完整性",
+        "confidence": 0.7,
+        "action": "needs_review"
+      }
+    ]
+  },
+  "e991b40803d26c9984af6491ff7220d6016fe74ff90e17173b7662e3a584191e": {
+    "fields": {
+      "established": "2021年03月24日",
+      "term": "2021年03月24日至长期",
+      "issue_date": "2021年03月24日"
+    }
+  },
+  "ff64ab7eea8cfe5603bfe64af20a0719cf14e458d49724e8691fd352994bf980": {
+    "overall_status": "needs_review",
+    "issues": [
+      {
+        "field": "type",
+        "type": "untranslated_chinese",
+        "chinese": "型 有限责任公司(自然人独资)",
+        "english": "Limited Liability Company (Wholly Owned by an Individual)",
+        "reason": "The source field contains a stray leading character '型' (likely OCR artifact from '类型'), which is not reflected in the translation. The translation itself is acceptable, but the source discrepancy should be confirmed.",
+        "confidence": 0.7,
+        "action": "needs_review"
+      },
+      {
+        "field": "authority",
+        "type": "hallucinated_content",
+        "chinese": "",
+        "english": "Shangrao Municipal Market Supervision and Administration Bureau (Sealed)",
+        "reason": "The Chinese source for 'authority' is empty, but the English translation contains a specific issuing authority not present in the source. This appears to be inferred/hallucinated content and must be verified or removed.",
+        "confidence": 0.95,
+        "action": "needs_review"
+      },
+      {
+        "field": "scope",
+        "type": "missing_translation",
+        "chinese": "",
+        "english": "",
+        "reason": "The business scope (经营范围) is empty in both source and translation. This is a required field on a Chinese business license; its absence should be flagged for human review.",
+        "confidence": 0.8,
+        "action": "needs_review"
+      },
+      {
+        "field": "capital",
+        "type": "formatting_issue",
+        "chinese": "壹佰万元整",
+        "english": "CNY One Million Only",
+        "reason": "Registered capital is typically rendered as 'CNY 1,000,000' or 'RMB 1,000,000'. The spelled-out form 'One Million Only' is non-standard for business documents.",
+        "confidence": 0.6,
+        "action": "needs_review"
+      },
+      {
+        "field": "term",
+        "type": "formatting_issue",
+        "chinese": "2021年03月24日至长期",
+        "english": "March 24, 2021 to Long term",
+        "reason": "'Long term' should be capitalized consistently or rendered as 'Long-term' / 'Indefinite'. Minor style issue.",
+        "confidence": 0.5,
+        "action": "pass"
+      },
+      {
+        "field": "address",
+        "type": "place_name_check",
+        "chinese": "江西省上饶市横峰县岑阳镇人民大道259号",
+        "english": "No. 259, Renmin Avenue, Cenyang Town, Hengfeng County, Shangrao City, Jiangxi Province",
+        "reason": "Place names (Hengfeng County, Shangrao City, Jiangxi Province, Cenyang Town) appear correct and follow smallest-to-largest order. 'Renmin Avenue' is a standard pinyin rendering of 人民大道. No action needed, but official-source verification is recommended for the town name 'Cenyang'.",
+        "confidence": 0.85,
+        "action": "web_verify"
+      },
+      {
+        "field": "name",
+        "type": "company_name_check",
+        "chinese": "横峰县育民建筑劳务服务有限公司",
+        "english": "Hengfeng County Yumin Construction Labor Services Co., Ltd.",
+        "reason": "Company name follows standard conventions: place name + trade name (Yumin) + industry (Construction Labor Services) + entity type (Co., Ltd.). Acceptable.",
+        "confidence": 0.9,
+        "action": "pass"
+      },
+      {
+        "field": "legal_person",
+        "type": "name_check",
+        "chinese": "尹益高",
+        "english": "Yin Yigao",
+        "reason": "Pinyin rendering of the legal representative's name is correct (surname Yin, given name Yigao).",
+        "confidence": 0.95,
+        "action": "pass"
+      }
+    ]
+  }
+}
