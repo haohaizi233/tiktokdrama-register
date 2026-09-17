@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import queue
 import subprocess
@@ -19,8 +20,8 @@ import tkinter as tk
 
 ROOT = Path(__file__).resolve().parent
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
-STATUS_WAIT, STATUS_RUN, STATUS_DONE, STATUS_SKIP, STATUS_ERR = (
-    "等待", "转换中", "完成", "非A格式", "失败",
+STATUS_WAIT, STATUS_RUN, STATUS_DONE, STATUS_SKIP, STATUS_ERR, STATUS_REVIEW = (
+    "等待", "转换中", "完成", "非A格式", "失败", "需复核",
 )
 STATUS_COLOR = {
     STATUS_WAIT: "#555555",
@@ -28,6 +29,7 @@ STATUS_COLOR = {
     STATUS_DONE: "#0a7d32",
     STATUS_SKIP: "#b26a00",
     STATUS_ERR: "#c62828",
+    STATUS_REVIEW: "#c62828",
 }
 LOG_TAGS = {
     "info": "#222222",
@@ -51,6 +53,7 @@ WARN_LABELS = {
     "issue_date": "发证日期缺失",
     "qr_mismatch": "QR与信用代码不一致",
     "old_format_license": "老版执照(无信用代码)",
+    "need_review": "需人工确认",
 }
 EN_WARN_LABELS = {
     "en_name_empty": "英译名称空",
@@ -60,6 +63,84 @@ EN_WARN_LABELS = {
     "en_address_empty": "英译地址空",
 }
 CONF_THRESHOLD = 0.6
+_GPU_PROBE_TIMEOUT_S = 4.0
+_GPU_UI_TIMEOUT_MS = 4500
+_GPU_PROBE_SCRIPT = (
+    "import json,sys\n"
+    "try:\n"
+    "    import onnxruntime as ort\n"
+    "    json.dump({'ok': True, 'providers': list(ort.get_available_providers())}, sys.stdout)\n"
+    "except Exception as e:\n"
+    "    json.dump({'ok': False, 'providers': ['CPUExecutionProvider'], 'error': str(e)}, sys.stdout)\n"
+)
+
+
+_GPU_PROBE_CACHE: dict | None = None
+
+
+def probe_onnx_providers(
+    timeout: float = _GPU_PROBE_TIMEOUT_S,
+    *,
+    use_cache: bool = False,
+) -> dict:
+    """Probe ONNX Runtime in a child process so CUDA DLL load cannot freeze Tk.
+
+    Must not import license_trans: that package init pulls pipeline/WeChat/OCR
+    and can hang longer than any in-thread timeout.
+    """
+    global _GPU_PROBE_CACHE
+    if use_cache and _GPU_PROBE_CACHE is not None:
+        return _GPU_PROBE_CACHE
+    flags = 0
+    if sys.platform == "win32":
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _GPU_PROBE_SCRIPT],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=flags,
+        )
+        line = (proc.stdout or "").strip().splitlines()
+        data = json.loads(line[-1]) if line else {}
+        providers = list(data.get("providers") or ["CPUExecutionProvider"])
+        result = {
+            "ok": bool(data.get("ok", True)),
+            "providers": providers,
+            "error": data.get("error") or (proc.stderr or "").strip(),
+        }
+    except subprocess.TimeoutExpired:
+        result = {
+            "ok": False,
+            "providers": ["CPUExecutionProvider"],
+            "error": f"onnxruntime probe timed out after {timeout:.0f}s",
+        }
+    except Exception as exc:
+        result = {
+            "ok": False,
+            "providers": ["CPUExecutionProvider"],
+            "error": str(exc),
+        }
+    _GPU_PROBE_CACHE = result
+    return result
+
+
+def gpu_label_from_providers(providers: list[str]) -> tuple[str, str, str]:
+    """Return (label, color, detail) for the GPU status strip."""
+    if "CUDAExecutionProvider" in providers:
+        prov, color = "CUDA", "#0a7d32"
+        text = "GPU: CUDA ✓"
+    elif "DmlExecutionProvider" in providers:
+        prov, color = "DirectML", "#0a7d32"
+        text = "GPU: DirectML ✓"
+    else:
+        prov, color = "CPU", "#b26a00"
+        text = "GPU: CPU（ORT 无 CUDA/DML）"
+    detail = f"ONNX Runtime providers: {', '.join(providers) or 'unavailable'} | Selected: {prov}"
+    if "CUDAExecutionProvider" not in providers and "DmlExecutionProvider" not in providers:
+        detail += " | " + (
+            "当前是 CPU 版 onnxruntime。笔记本 RTX 请安装 onnxruntime-directml 或 onnxruntime-gpu。"
+        )
+    return text, color, detail
 
 
 def _warn_label(code: str) -> str:
@@ -77,7 +158,8 @@ def _warn_label(code: str) -> str:
         return f"{names.get(field, field)}识别不准"
     return code
 LICENSE_PKGS = [
-    ("rapidocr_onnxruntime", "rapidocr-onnxruntime"),
+    ("rapidocr", "rapidocr>=3.9.0"),
+    ("onnxruntime", "onnxruntime-directml"),
     ("cv2", "opencv-python"),
     ("fitz", "pymupdf"),
     ("PIL", "pillow"),
@@ -86,7 +168,82 @@ LICENSE_PKGS = [
     ("pypinyin", "pypinyin"),
     ("numpy", "numpy"),
     ("translators", "translators"),
+    ("openai", "openai"),
 ]
+WECHAT_OCR_PIP = "py-wechat-ocr==0.1.1"
+# translators probes OneTrust geo on import; SSL/proxy failures must not abort conversion.
+_OPTIONAL_IMPORT_PKGS = frozenset({"translators"})
+
+
+def _prepare_import(mod: str) -> None:
+    if mod == "translators":
+        os.environ.setdefault("translators_default_region", "CN")
+
+
+def _import_license_mod(mod: str) -> bool:
+    """True if the package is present. Optional pkgs may fail later (network), not pip."""
+    _prepare_import(mod)
+    try:
+        __import__(mod)
+        return True
+    except ImportError:
+        return False
+    except Exception:
+        if mod in _OPTIONAL_IMPORT_PKGS:
+            return True
+        raise
+
+
+def _wechat_wrapper_importable() -> bool:
+    """True if either wcocr or wechat_ocr can be imported."""
+    try:
+        import wcocr  # noqa: F401
+        return True
+    except ImportError:
+        pass
+    try:
+        import wechat_ocr  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _log_ocr_health(log, engine=None):
+    """Log OCR engine health check (WeChat + PP-OCRv6). READY only if initialized."""
+    try:
+        from license_trans.ocr_wechat import wechat_ocr_health_check
+        from license_trans import load_config
+        cfg = load_config()
+        wx = {}
+        if engine is not None and hasattr(engine, "health_status"):
+            status = engine.health_status()
+            wx = status.get("wechat") or {}
+            log(f"  主 OCR: {status.get('primary')}", "ok")
+            log(f"  Fallback 模式: {'是' if status.get('fallback_mode') else '否'}",
+                "warn" if status.get("fallback_mode") else "ok")
+        else:
+            wx = wechat_ocr_health_check(cfg, init=False)
+        if wx.get("initialized") or wx.get("ready"):
+            log(f"  WeChat OCR: READY ({wx.get('path')})", "ok")
+        elif wx.get("available"):
+            log(
+                f"  WeChat OCR: AVAILABLE (未初始化) — {wx.get('error') or wx.get('path')}",
+                "warn",
+            )
+        else:
+            log(f"  WeChat OCR: UNAVAILABLE — {wx.get('error')}", "dim")
+    except Exception as exc:
+        log(f"  WeChat OCR health check failed: {exc}", "warn")
+    try:
+        from license_trans.ai_client import is_ai_enabled
+        from license_trans import load_config
+        cfg = load_config()
+        if is_ai_enabled(cfg):
+            log("  AI 语义校验: READY", "ok")
+        else:
+            log("  AI 语义校验: 未配置 (仅规则模式)", "dim")
+    except Exception as exc:
+        log(f"  AI health check failed: {exc}", "warn")
 
 
 def collect_images(paths: list[Path], recursive: bool = False) -> list[Path]:
@@ -126,9 +283,14 @@ def ensure_license_deps(log) -> bool:
     missing: list[tuple[str, str]] = []
     for mod, pip_name in LICENSE_PKGS:
         try:
-            __import__(mod)
-        except ImportError:
-            missing.append((mod, pip_name))
+            if _import_license_mod(mod):
+                continue
+        except Exception as exc:
+            log(f"导入 {mod} 失败: {exc}", "err")
+            return False
+        missing.append((mod, pip_name))
+    if sys.platform == "win32" and not _wechat_wrapper_importable():
+        missing.append(("wechat_ocr", WECHAT_OCR_PIP))
     if not missing:
         return True
     names = " ".join(p for _, p in missing)
@@ -137,10 +299,92 @@ def ensure_license_deps(log) -> bool:
         [sys.executable, "-m", "pip", "install", *[p for _, p in missing]],
         capture_output=True, text=True)
     if r.returncode != 0:
+        optional = [p for m, p in missing if m in _OPTIONAL_IMPORT_PKGS]
+        required = [p for m, p in missing if m not in _OPTIONAL_IMPORT_PKGS]
         log(f"依赖安装失败: {(r.stderr or r.stdout)[-400:]}", "err")
-        return False
+        if required:
+            return False
+        if optional:
+            log("在线翻译库安装失败，将改用词库/AI", "warn")
+        return True
     log("执照翻译依赖安装完成", "ok")
     return True
+
+
+OCR_ENGINE_CHOICES = (
+    ("wechat_v6", "微信 OCR（PP-OCRv6 回退）"),
+    ("v6_medium", "仅 PP-OCRv6 Medium"),
+    ("v3", "仅 PP-OCRv3（旧版/快）"),
+)
+_OCR_LABEL_BY_KEY = {k: lab for k, lab in OCR_ENGINE_CHOICES}
+_OCR_KEY_BY_LABEL = {lab: k for k, lab in OCR_ENGINE_CHOICES}
+
+
+def _save_ocr_choice(key: str) -> None:
+    """Persist OCR engine + PP-OCR model + WeChat toggle."""
+    cfg_path = ROOT / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        cfg = {}
+    wx = dict(cfg.get("wechat_ocr") or {})
+    if key == "wechat_v6":
+        wx["enabled"] = True
+        cfg["ocr_engine"] = "wechat"
+        cfg["ocr_model"] = "v6_medium"
+    elif key == "v3":
+        wx["enabled"] = False
+        cfg["ocr_engine"] = "rapidocr"
+        cfg["ocr_model"] = "v3"
+    else:
+        wx["enabled"] = False
+        cfg["ocr_engine"] = "rapidocr"
+        cfg["ocr_model"] = "v6_medium"
+    cfg["wechat_ocr"] = wx
+    cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _read_ocr_choice_label() -> str:
+    """Combobox display text from config (WeChat is default primary)."""
+    cfg_path = ROOT / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except Exception:
+        return _OCR_LABEL_BY_KEY["wechat_v6"]
+    wx_on = (cfg.get("wechat_ocr") or {}).get("enabled", True) is not False
+    model = str(cfg.get("ocr_model") or "v6_medium")
+    engine = str(cfg.get("ocr_engine") or "wechat")
+    if wx_on and engine in ("wechat", "auto", ""):
+        key = "wechat_v6"
+    elif model == "v3":
+        key = "v3"
+    else:
+        key = "v6_medium"
+    return _OCR_LABEL_BY_KEY.get(key, _OCR_LABEL_BY_KEY["wechat_v6"])
+
+
+def _save_ocr_model(model: str) -> None:
+    """Back-compat: persist only ocr_model (used by tests / older callers)."""
+    if model in _OCR_LABEL_BY_KEY:
+        _save_ocr_choice(model)
+        return
+    if "微信" in model or model == "wechat_v6":
+        _save_ocr_choice("wechat_v6")
+        return
+    if "v3" in model.lower() and "v6" not in model.lower():
+        _save_ocr_choice("v3")
+        return
+    _save_ocr_choice("v6_medium")
+
+
+def _read_ocr_model() -> str:
+    """Back-compat: return stored ocr_model key."""
+    cfg_path = ROOT / "config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        return cfg.get("ocr_model", "v6_medium")
+    except Exception:
+        return "v6_medium"
 
 
 class LicensePage(ttk.Frame):
@@ -158,6 +402,9 @@ class LicensePage(ttk.Frame):
         self._file_dirs: dict[str, str] = {}  # path -> parent dir str
         self._common_dir: str | None = None  # shared parent dir or None
         self._detecting = False  # folder detection in progress
+        self._gpu_detecting = False
+        self._gpu_token = 0
+        self._gpu_timeout_job = None
         self._log_buffer: list[str] = []
         self._preview_token: int = 0
         self._build()
@@ -165,6 +412,7 @@ class LicensePage(ttk.Frame):
         self._append_log(
             "只转换 A 格式公司法人营业执照。个体户/合伙/分公司会标成「非A格式」。",
             "dim")
+        self.after(200, lambda: self.detect_gpu(silent=True))
 
     def _build(self):
         body = ttk.Frame(self)
@@ -246,6 +494,23 @@ class LicensePage(ttk.Frame):
         ttk.Label(date_row, text="例 2022-12-09", foreground="#777777").pack(
             side="left")
 
+        ocr_row = ttk.Frame(right)
+        ocr_row.pack(fill="x", padx=10, pady=(4, 2))
+        ttk.Label(ocr_row, text="OCR 模型").pack(side="left")
+        self.var_ocr_model = tk.StringVar(value=_read_ocr_choice_label())
+        self.cmb_ocr_model = ttk.Combobox(
+            ocr_row, textvariable=self.var_ocr_model, width=30,
+            state="readonly",
+            values=[lab for _, lab in OCR_ENGINE_CHOICES],
+        )
+        self.cmb_ocr_model.pack(side="left", padx=6)
+        self.cmb_ocr_model.bind("<<ComboboxSelected>>", self._on_model_change)
+        self.btn_detect_gpu = ttk.Button(
+            ocr_row, text="检测 GPU", command=self.detect_gpu, width=10)
+        self.btn_detect_gpu.pack(side="left", padx=(4, 0))
+        self.lbl_gpu = ttk.Label(ocr_row, text="GPU: 未检测", foreground="#888888")
+        self.lbl_gpu.pack(side="left", padx=6)
+
         act = ttk.Frame(right)
         act.pack(fill="x", padx=10, pady=(4, 6))
         self.btn_start = ttk.Button(act, text="▶ 开始转换", command=self.start_convert)
@@ -278,6 +543,69 @@ class LicensePage(ttk.Frame):
     def _sync_date(self):
         self.ent_date.config(
             state="normal" if self.var_date_on.get() else "disabled")
+
+    def _on_model_change(self, _event=None):
+        sel = self.var_ocr_model.get()
+        key = _OCR_KEY_BY_LABEL.get(sel, "wechat_v6")
+        _save_ocr_choice(key)
+        self._append_log(f"OCR 模型已切换为: {sel}（下次转换生效）", "info")
+
+    def detect_gpu(self, silent: bool = False):
+        """Detect GPU off the UI thread. UI watchdog always clears「检测中」."""
+        self._gpu_token += 1
+        token = self._gpu_token
+        self._gpu_detecting = True
+        self.btn_detect_gpu.config(state="disabled")
+        self.lbl_gpu.config(text="GPU: 检测中…", foreground="#888888")
+        if self._gpu_timeout_job is not None:
+            try:
+                self.after_cancel(self._gpu_timeout_job)
+            except tk.TclError:
+                pass
+        self._gpu_timeout_job = self.after(
+            _GPU_UI_TIMEOUT_MS, lambda: self._gpu_watchdog(token))
+
+        def _work():
+            try:
+                info = probe_onnx_providers(_GPU_PROBE_TIMEOUT_S, use_cache=silent)
+                text, color, detail = gpu_label_from_providers(info["providers"])
+                if info.get("error") and not info.get("ok"):
+                    detail = f"{detail} | {info['error']}"
+                self.q.put(("gpu_result", token, text, color, detail, silent))
+            except Exception as exc:
+                self.q.put((
+                    "gpu_result", token, "GPU: 检测失败", "#c62828", str(exc), silent,
+                ))
+
+        threading.Thread(target=_work, daemon=True, name="gpu-detect").start()
+
+    def _gpu_watchdog(self, token: int):
+        if token != self._gpu_token or not self._gpu_detecting:
+            return
+        self._apply_gpu_result(
+            token,
+            "GPU: 检测超时 (使用 CPU)",
+            "#b26a00",
+            "GPU 探测超时，已按 CPU 继续。可再点「检测 GPU」。",
+            silent=False,
+        )
+
+    def _apply_gpu_result(
+        self, token: int, text: str, color: str, detail: str, silent: bool = False,
+    ):
+        if token != self._gpu_token:
+            return
+        self._gpu_detecting = False
+        if self._gpu_timeout_job is not None:
+            try:
+                self.after_cancel(self._gpu_timeout_job)
+            except tk.TclError:
+                pass
+            self._gpu_timeout_job = None
+        self.lbl_gpu.config(text=text, foreground=color)
+        self.btn_detect_gpu.config(state="normal")
+        if detail and not silent:
+            self._append_log(detail.replace("\n", " | "), "dim")
 
     def _sync_actions(self):
         has = bool(self._rows)
@@ -356,15 +684,21 @@ class LicensePage(ttk.Frame):
         def log(msg, level="info"):
             self.q.put(("log", level, f"[{datetime.now():%H:%M:%S}] {msg}"))
 
-        if not ensure_license_deps(log):
+        try:
+            if not ensure_license_deps(log):
+                self.q.put(("detect_done", 0, 0))
+                return
+        except Exception as exc:
+            log(f"依赖检查失败: {exc}", "err")
             self.q.put(("detect_done", 0, 0))
             return
-        from license_trans.ocr import LicenseOCR
+        from license_trans.ocr_service import OcrService
         from license_trans.pipeline import detect_license, _pick_best_license
 
         log("加载 OCR 引擎(首次会稍慢)…", "dim")
         try:
-            engine = LicenseOCR()
+            from license_trans.pipeline import load_config
+            engine = OcrService(load_config())
         except Exception as e:
             log(f"OCR 引擎加载失败: {e}", "err")
             self.q.put(("detect_done", 0, len(images)))
@@ -373,6 +707,7 @@ class LicensePage(ttk.Frame):
         eng = getattr(engine, "engine_name", "RapidOCR")
         quick_workers = min(5, len(images))
         log(f"OCR 引擎就绪: {eng} ({prov}), 并行{quick_workers}线程快速扫描…", "ok")
+        _log_ocr_health(log, engine)
         total = len(images)
         by_dir: dict[str, list[tuple[Path, list]]] = {}
         scanned = 0
@@ -447,15 +782,21 @@ class LicensePage(ttk.Frame):
         def progress(i, tot, name):
             self.q.put(("scan_progress", i, tot, name))
 
-        if not ensure_license_deps(log):
+        try:
+            if not ensure_license_deps(log):
+                self.q.put(("scan_done", 0, 0, 0, 0))
+                return
+        except Exception as exc:
+            log(f"依赖检查失败: {exc}", "err")
             self.q.put(("scan_done", 0, 0, 0, 0))
             return
-        from license_trans.ocr import LicenseOCR
+        from license_trans.ocr_service import OcrService
         from license_trans.pipeline import process_license_library
 
         log("加载 OCR 引擎(首次会稍慢)…", "dim")
         try:
-            engine = LicenseOCR()
+            from license_trans.pipeline import load_config
+            engine = OcrService(load_config())
         except Exception as e:
             log(f"OCR 引擎加载失败: {e}", "err")
             self.q.put(("scan_done", 0, 0, 0, 0))
@@ -463,6 +804,7 @@ class LicensePage(ttk.Frame):
         prov = getattr(engine, "gpu_provider", "CPU")
         eng = getattr(engine, "engine_name", "RapidOCR")
         log(f"OCR 引擎就绪: {eng} ({prov}), 开始扫描执照库…", "ok")
+        _log_ocr_health(log, engine)
         try:
             result = process_license_library(
                 source, dest, max_workers=5, engine=engine,
@@ -593,16 +935,22 @@ class LicensePage(ttk.Frame):
         def log(msg, level="info"):
             self.q.put(("log", level, f"[{datetime.now():%H:%M:%S}] {msg}"))
 
-        if not ensure_license_deps(log):
+        try:
+            if not ensure_license_deps(log):
+                self.q.put(("done", 0, 0, 0, True))
+                return
+        except Exception as exc:
+            log(f"依赖检查失败: {exc}", "err")
             self.q.put(("done", 0, 0, 0, True))
             return
         from license_trans.classify import NotFormatA
-        from license_trans.ocr import LicenseOCR
+        from license_trans.ocr_service import OcrService
         from license_trans.pipeline import convert_image
 
         log("加载 OCR 引擎(首次会稍慢)…", "dim")
         try:
-            engine = LicenseOCR()
+            from license_trans.pipeline import load_config
+            engine = OcrService(load_config())
         except Exception as e:
             log(f"OCR 引擎加载失败: {e}", "err")
             self.q.put(("done", 0, 0, len(paths), True))
@@ -611,6 +959,7 @@ class LicensePage(ttk.Frame):
         eng = getattr(engine, "engine_name", "RapidOCR")
         convert_workers = min(3, len(paths))
         log(f"OCR 引擎就绪: {eng} ({prov}), 并行{convert_workers}线程转换…", "ok")
+        _log_ocr_health(log, engine)
         done = skipped = failed = 0
         completed = 0
         total = len(paths)
@@ -659,12 +1008,31 @@ class LicensePage(ttk.Frame):
                     warnings = list(dict.fromkeys(
                         (info["fields"].get("warnings") or [])
                         + (info["english"].get("warnings") or [])))
-                    note = "需核对: " + ", ".join(_warn_label(w) for w in warnings) if warnings else "字段完整"
-                    self.q.put(("item", raw, STATUS_DONE, str(dest), note))
+                    needs = list(info.get("needs_review") or [])
+                    st = info.get("status") or {}
+                    if needs:
+                        note = "需人工确认: " + ", ".join(needs)
+                    elif warnings:
+                        note = "需核对: " + ", ".join(_warn_label(w) for w in warnings)
+                    else:
+                        note = "字段完整"
+                    row_status = STATUS_REVIEW if needs else STATUS_DONE
+                    self.q.put(("item", raw, row_status, str(dest), note))
                     self.q.put(("fields", raw, info["fields"]))
                     self.q.put(("preview", str(dest)))
                     log(f"  ✓ {Path(dest).name}", "ok")
-                    if warnings:
+                    log(
+                        f"  主 OCR：{st.get('ocr_primary') or info.get('ocr_primary') or '—'}  "
+                        f"Fallback：{'是' if st.get('fallback_used') or info.get('fallback_used') else '否'}  "
+                        f"AI 校验：{'通过' if st.get('ai_validated') else '规则模式'}  "
+                        f"字段重识别：{st.get('field_retries', 0)}  "
+                        f"联网核验：{st.get('web_verified', 0)}  "
+                        f"人工确认：{st.get('need_review', len(needs))}",
+                        "err" if needs else "ok",
+                    )
+                    if needs:
+                        log(f"  ⚠ {Path(raw).name}  关键字段无法确认: {', '.join(needs)}", "err")
+                    elif warnings:
                         log(f"  {Path(raw).name}  {note}", "warn")
                     done += 1
                 elif kind == "skip":
@@ -750,6 +1118,9 @@ class LicensePage(ttk.Frame):
                         f"翻译成功: {processed_n} 个\n失败: {failed_n} 个\n"
                         f"已移动到资料: {moved_n} 个\n跳过(无执照): {skipped_n} 个",
                         parent=self)
+                elif kind == "gpu_result":
+                    _, token, text, color, detail, silent = msg
+                    self._apply_gpu_result(token, text, color, detail, silent)
                 elif kind == "done":
                     _, done, skipped, failed, stopped = msg
                     self._set_busy(False)

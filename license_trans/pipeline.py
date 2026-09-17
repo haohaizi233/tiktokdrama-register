@@ -14,8 +14,19 @@ from .ocr import LicenseOCR, OcrLine, _run_ocr, _USCI_RE
 from .parse import parse_license
 from .render import render_pdf
 from .translate import translate_fields
+from .field_state import FieldState, FieldStatus, FieldStateTracker, CRITICAL_FIELDS
+from .canonical import CanonicalChineseRecord
+from .ai_client import AIClient, is_ai_enabled
+from .ai_validator import LicenseSemanticValidator, TranslationValidator
+from .ocr_ensemble import OcrEnsemble, OcrCandidateFusion, FieldOcrCandidate
+from .field_crop import FieldCropper
+from .ocr_service import OcrService
+from .rule_repair import apply_deterministic_repairs, field_passes_rules
+from .translation_resolver import TranslationResolver, leftover_cjk
+from .trace import PipelineTrace, new_trace_id
 
 ROOT = Path(__file__).resolve().parent.parent
+ASSETS = ROOT / "assets"
 LOG = logging.getLogger("license_trans")
 
 
@@ -31,8 +42,8 @@ def _detect_qr_points(image_bgr) -> np.ndarray | None:
         _, points, _ = detector.detectAndDecode(image_bgr)
         if points is not None:
             return points.reshape(-1, 2)
-    except Exception:
-        pass
+    except Exception as exc:
+        LOG.debug("QR detect failed: %s", exc, exc_info=True)
     # Try pyzbar if available (more robust)
     try:
         from pyzbar import pyzbar
@@ -43,7 +54,9 @@ def _detect_qr_points(image_bgr) -> np.ndarray | None:
             x, y, w, h = rect.left, rect.top, rect.width, rect.height
             return np.array([[x, y], [x + w, y], [x + w, y + h], [x, y + h]], dtype=np.float32)
     except ImportError:
-        pass
+        LOG.debug("pyzbar not installed")
+    except Exception as exc:
+        LOG.debug("pyzbar QR detect failed: %s", exc, exc_info=True)
     return None
 
 
@@ -219,16 +232,16 @@ def _decode_qr(image_bgr) -> str:
         data, _, _ = detector.detectAndDecode(image_bgr)
         if data:
             return data.strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        LOG.debug("QR decode failed: %s", exc, exc_info=True)
     # Try on enhanced
     enhanced = _enhance_for_qr(image_bgr)
     try:
         data, _, _ = detector.detectAndDecode(enhanced)
         if data:
             return data.strip()
-    except Exception:
-        pass
+    except Exception as exc:
+        LOG.debug("QR enhanced decode failed: %s", exc, exc_info=True)
     # Try on upscaled
     for scale in (2, 3):
         upscaled = cv2.resize(image_bgr, None, fx=scale, fy=scale,
@@ -237,8 +250,8 @@ def _decode_qr(image_bgr) -> str:
             data, _, _ = detector.detectAndDecode(upscaled)
             if data:
                 return data.strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            LOG.debug("QR upscaled decode failed: %s", exc, exc_info=True)
     # Try pyzbar
     try:
         from pyzbar import pyzbar
@@ -246,7 +259,9 @@ def _decode_qr(image_bgr) -> str:
         if results:
             return (results[0].data.decode("utf-8", errors="replace")).strip()
     except ImportError:
-        pass
+        LOG.debug("pyzbar not installed")
+    except Exception as exc:
+        LOG.debug("pyzbar decode failed: %s", exc, exc_info=True)
     return ""
 
 
@@ -409,29 +424,275 @@ def _missing_critical(fields) -> list[str]:
     return [f for f in CRITICAL_FIELDS if not getattr(fields, f, "")]
 
 
+def _build_tracker(fields) -> FieldStateTracker:
+    """Build a FieldStateTracker from parsed LicenseFields."""
+    tracker = FieldStateTracker()
+    for attr in ("credit_code", "name", "type", "legal_person", "scope",
+                 "capital", "established", "address", "term", "authority",
+                 "issue_date"):
+        val = getattr(fields, attr, "") or ""
+        score = 0.0
+        # Use warnings to set initial status
+        status = FieldStatus.OK
+        if not val and attr in fields.warnings:
+            status = FieldStatus.SUSPECTED_OCR_ERROR
+        elif f"{attr}_low_confidence" in fields.warnings:
+            status = FieldStatus.LOW_CONFIDENCE
+        tracker.init_field(attr, val, score)
+        tracker.get(attr).status = status
+    return tracker
+
+
+MAX_FIELD_OCR_RETRY = 2
+MAX_AI_VALIDATION_ROUND = 2
+
+
+def _run_ai_validation_and_retry(
+    fields,
+    lines: list[OcrLine],
+    oriented: np.ndarray,
+    config: dict,
+    engine,
+    trace: PipelineTrace | None = None,
+) -> FieldStateTracker:
+    """Rule repair → AI flag → field OCR retry → second validation.
+
+    AI never writes Chinese facts. Retry failures become NEED_REVIEW.
+    """
+    tracker = _build_tracker(fields)
+    apply_deterministic_repairs(fields, tracker)
+    if trace:
+        trace.emit("RULE_VALIDATION", repairs=len(tracker.to_dict()))
+
+    ai_client = AIClient(config)
+    validator = LicenseSemanticValidator(ai_client)
+    parsed_dict = fields.to_dict()
+    raw_texts = [ln.text for ln in lines]
+
+    if not ai_client.is_available():
+        tracker.finalize_retries()
+        return tracker
+
+    for round_i in range(MAX_AI_VALIDATION_ROUND):
+        tracker.ai_round = round_i + 1
+        LOG.info("[AI] 中文语义校验 round %d…", round_i + 1)
+        result = validator.validate(parsed_dict, raw_texts, list(fields.warnings))
+        if trace:
+            trace.emit(
+                "AI_VALIDATION",
+                round=round_i + 1,
+                overall=result.get("overall_status"),
+                issues=len(result.get("issues") or []),
+            )
+        retry_fields = validator.apply_to_tracker(result, tracker)
+        retry_fields = [f for f in retry_fields if tracker.can_retry(f)]
+        if not retry_fields:
+            break
+        LOG.info("[AI] 需要重新 OCR 的字段: %s", retry_fields)
+        resolved = _field_level_retry(
+            retry_fields, fields, lines, oriented, engine, tracker, trace)
+        for name in retry_fields:
+            if name not in resolved:
+                tracker.mark_need_review(name, "retry_failed")
+            elif tracker.get(name) and tracker.get(name).status == FieldStatus.RETRY_OCR:
+                tracker.get(name).status = FieldStatus.OK
+        parsed_dict = fields.to_dict()
+        if not resolved:
+            break
+
+    tracker.finalize_retries()
+    return tracker
+
+
+def _retry_one_field(
+    field_name: str,
+    fields,
+    cropper: FieldCropper,
+    ensemble: OcrEnsemble,
+    fusion: OcrCandidateFusion,
+    tracker: FieldStateTracker,
+    trace: PipelineTrace | None = None,
+) -> bool:
+    """Return True if a rule-valid candidate was adopted."""
+    fs = tracker.get(field_name)
+    if fs is None:
+        return False
+    if not tracker.can_retry(field_name):
+        LOG.info("[OCR] %s 已达最大重试次数", field_name)
+        return False
+    tracker.mark_retry(field_name)
+    LOG.info("[OCR] 字段级重 OCR: %s", field_name)
+    if trace:
+        trace.emit("FIELD_RETRY", field=field_name, attempt=tracker.retry_count(field_name))
+    try:
+        candidates = cropper.generate_candidates(field_name, ensemble)
+    except Exception:
+        LOG.exception("[OCR] 字段裁剪失败 %s", field_name)
+        return False
+    if not candidates:
+        LOG.info("[OCR] %s 无候选结果", field_name)
+        return False
+    fused = fusion.fuse_field_ex(field_name, candidates)
+    if trace:
+        trace.emit(
+            "OCR_FUSION",
+            field=field_name,
+            conflict=fused.engine_conflict,
+            independent=fused.independent_engines,
+        )
+    best = fused.winner
+    if best is None or not str(best.text).strip():
+        return False
+    fs.candidates = [
+        {"text": c.text, "score": c.score, "engine": c.engine,
+         "variant": getattr(c, "variant", "")}
+        for c in candidates
+    ]
+    new_val = best.text.strip()
+    if not field_passes_rules(field_name, new_val):
+        LOG.info("[OCR] %s 候选未通过规则: %s", field_name, new_val[:40])
+        return False
+    old_val = fs.value
+    if new_val != old_val:
+        fs.add_repair(
+            old_val, new_val, "ocr_fusion",
+            confidence=best.score if best.score is not None else 0.0,
+            reason=f"Field-level re-OCR via {best.engine}/{best.variant}",
+        )
+        setattr(fields, field_name, new_val)
+        LOG.info("[OCR] %s 修复: '%s' → '%s' (via %s)",
+                 field_name, old_val[:30], new_val[:30], best.engine)
+    fs.status = FieldStatus.OK
+    return True
+
+
+def _field_level_retry(
+    retry_fields: list[str],
+    fields,
+    lines: list[OcrLine],
+    oriented: np.ndarray,
+    engine,
+    tracker: FieldStateTracker,
+    trace: PipelineTrace | None = None,
+) -> list[str]:
+    """Re-OCR fields. Returns names that produced a rule-valid candidate."""
+    config = load_config()
+    try:
+        wechat = getattr(engine, "_wechat", None)
+        ppocr = getattr(engine, "_ppocr", None)
+        ensemble = OcrEnsemble(
+            config, wechat=wechat, ppocr=ppocr,
+            init_engines=wechat is None and ppocr is None,
+        )
+    except Exception:
+        LOG.exception("[OCR] Ensemble init failed for field retry")
+        return []
+
+    cropper = FieldCropper(oriented, lines)
+    fusion = OcrCandidateFusion()
+    resolved: list[str] = []
+    for field_name in retry_fields:
+        if _retry_one_field(
+            field_name, fields, cropper, ensemble, fusion, tracker, trace,
+        ):
+            resolved.append(field_name)
+    return resolved
+
+
+def _apply_qr_usci(fields, qr_usci: str, qr_data: str, trace: PipelineTrace | None = None) -> None:
+    from .usci import checksum_ok
+    if qr_usci and fields.credit_code and qr_usci != fields.credit_code:
+        if checksum_ok(qr_usci) and not checksum_ok(fields.credit_code):
+            fields.credit_code = qr_usci
+            if "credit_code" in fields.warnings:
+                fields.warnings.remove("credit_code")
+            LOG.info("QR USCI 覆盖无效 OCR 代码: %s", qr_usci)
+        else:
+            fields.warnings.append("qr_mismatch")
+            LOG.warning("QR USCI %s 与信用代码 %s 不一致", qr_usci, fields.credit_code)
+    elif qr_data and not qr_usci and fields.credit_code and fields.credit_code not in qr_data:
+        fields.warnings.append("qr_mismatch")
+        LOG.warning("QR 内容与信用代码不一致: %s", qr_data[:80])
+    elif qr_usci and not fields.credit_code:
+        fields.credit_code = qr_usci
+        if "credit_code" in fields.warnings:
+            fields.warnings.remove("credit_code")
+        LOG.info("从 QR 恢复信用代码: %s", qr_usci)
+    if trace:
+        trace.emit(
+            "QR_VALIDATION",
+            qr_usci=qr_usci,
+            credit_code=fields.credit_code,
+            mismatch="qr_mismatch" in fields.warnings,
+        )
+
+
+def _run_translation_pipeline(
+    canonical: CanonicalChineseRecord,
+    config: dict,
+    trace: PipelineTrace | None = None,
+) -> dict:
+    """Translate from Canonical Chinese only. Validator cannot overwrite English."""
+    chinese = canonical.to_translation_input()
+    resolver = TranslationResolver(config, trace=trace)
+    english = resolver.translate(chinese)
+
+    ai_client = AIClient(config)
+    flags: dict[str, str] = {}
+    if ai_client.is_available():
+        LOG.info("[AI] 翻译校验…")
+        validator = TranslationValidator(ai_client)
+        result = validator.validate(chinese, english)
+        flags = validator.collect_flags(result)
+        if trace:
+            trace.emit(
+                "TRANSLATION_VALIDATION",
+                issues=len(result.get("issues") or []),
+                flags=flags,
+            )
+        if result.get("issues"):
+            LOG.info("[AI] 翻译校验完成, 发现 %d 个问题（不直接改译文）",
+                     len(result["issues"]))
+        else:
+            LOG.info("[AI] 翻译校验通过")
+    for field in ("address", "authority", "name"):
+        if leftover_cjk(english.get(field) or ""):
+            flags.setdefault(field, "web_verify")
+    if flags:
+        english = resolver.apply_web_flags(english, chinese, flags)
+    return english
+
+
 def convert_image(
     image_path: str | Path,
     output_path: str | Path,
     *,
     config_path: str | Path | None = None,
     work_dir: str | Path | None = None,
-    ocr: LicenseOCR | None = None,
+    ocr: LicenseOCR | OcrService | None = None,
     translation_date: date | None = None,
     issue_date: str | None = None,
     fields_override=None,
+    trace: PipelineTrace | None = None,
 ) -> dict:
     image_path = Path(image_path)
     output_path = Path(output_path)
     config = load_config(config_path)
-    LOG.info("读取 %s", image_path.name)
-    engine = ocr or LicenseOCR()
+    trace = trace or PipelineTrace()
+    LOG.info("[%s] 读取 %s", trace.trace_id, image_path.name)
     meta: dict = {}
     if fields_override is not None:
+        from .ocr import _read_image
         from .parse import LicenseFields
+        engine = ocr
         fields = fields_override if isinstance(fields_override, LicenseFields) else LicenseFields(**fields_override)
         LOG.info("使用手动修正的字段, 跳过 OCR")
-        oriented, lines = engine.recognize(image_path, meta=meta)
+        oriented = _read_image(image_path)
+        lines = []
+        trace.emit("OCR_PRIMARY_START", skipped=True, reason="fields_override")
     else:
+        engine = ocr or OcrService(config)
+        trace.emit("OCR_PRIMARY_START", engine=getattr(engine, "engine_name", ""))
         LOG.info("OCR 四向纠偏…")
         oriented, lines = engine.recognize(image_path, meta=meta)
         LOG.info("识别 %d 行文字", len(lines))
@@ -480,27 +741,63 @@ def convert_image(
                 LOG.info("发证日期（碎片拼接）%s", fields.issue_date)
             else:
                 LOG.warning("发证日期未识别，可在面板里指定")
-    english = translate_fields(fields)
-    LOG.info("译文  %s", english.get("name") or "（无名称）")
+
+        if hasattr(engine, "last_meta") and engine.last_meta:
+            meta.update(engine.last_meta)
+        ocr_meta = {
+            "ocr_primary": meta.get("ocr_primary") or meta.get("primary") or getattr(engine, "primary_name", None) or getattr(engine, "engine_name", ""),
+            "ocr_actual": meta.get("ocr_actual") or getattr(engine, "engine_name", ""),
+            "fallback_used": bool(meta.get("fallback_used")),
+            "fallback": meta.get("fallback"),
+            "reason": meta.get("reason"),
+        }
+        if ocr_meta["fallback_used"]:
+            trace.emit("OCR_FALLBACK", **{k: v for k, v in ocr_meta.items() if v is not None})
+        elif str(ocr_meta["ocr_actual"]).startswith("wechat") or ocr_meta["ocr_primary"] == "wechat":
+            trace.emit("OCR_PRIMARY_OK", **ocr_meta)
+        else:
+            trace.emit("OCR_PRIMARY_FAILED", **ocr_meta)
+        trace.emit("PARSE_OK", missing=_missing_critical(fields))
+
+    if hasattr(engine, "last_meta") and engine.last_meta:
+        meta.update(engine.last_meta)
+
+    # --- QR before Canonical ---
     qr_src = meta.get("full_view") if isinstance(meta, dict) else None
     if qr_src is None:
         qr_src = oriented
     qr_bytes = _crop_qr(qr_src, lines)
     qr_data = _decode_qr(qr_src)
     qr_usci = _extract_usci_from_qr(qr_data)
-    if qr_usci and fields.credit_code and qr_usci != fields.credit_code:
-        fields.warnings.append("qr_mismatch")
-        LOG.warning("QR USCI %s 与信用代码 %s 不一致", qr_usci, fields.credit_code)
-    elif qr_data and not qr_usci and fields.credit_code and fields.credit_code not in qr_data:
-        fields.warnings.append("qr_mismatch")
-        LOG.warning("QR 内容与信用代码不一致: %s", qr_data[:80])
-    elif qr_usci and not fields.credit_code:
-        fields.credit_code = qr_usci
-        if "credit_code" in fields.warnings:
-            fields.warnings.remove("credit_code")
-        LOG.info("从 QR 恢复信用代码: %s", qr_usci)
+    _apply_qr_usci(fields, qr_usci, qr_data, trace)
+
+    # --- Rule + AI validation + field retry (mutates fields, then freeze) ---
+    if fields_override is not None:
+        tracker = FieldStateTracker()
+        for fname in CRITICAL_FIELDS:
+            tracker.init_field(fname, getattr(fields, fname, "") or "")
+        tracker.init_field("address", fields.address or "")
+        LOG.info("手动字段跳过 AI/OCR retry")
+    else:
+        tracker = _run_ai_validation_and_retry(
+            fields, lines, oriented, config, engine, trace)
+
+    canonical = CanonicalChineseRecord.from_fields(fields, tracker)
+    canonical.trace_id = trace.trace_id
+    canonical.ocr_primary = str(meta.get("ocr_primary") or meta.get("primary") or "")
+    canonical.ocr_actual = str(meta.get("ocr_actual") or "")
+    canonical.fallback_used = bool(meta.get("fallback_used"))
+    canonical.freeze()
+    if canonical.needs_review:
+        LOG.warning("以下字段需人工复核: %s", ", ".join(canonical.needs_review))
+    trace.emit("CANONICAL_READY", needs_review=canonical.needs_review)
+
+    english = _run_translation_pipeline(canonical, config, trace)
+    LOG.info("译文  %s", english.get("name") or "（无名称）")
+
     display = _display_view(oriented, lines, meta)
     LOG.info("渲染英文模板 PDF")
+    trace.emit("PDF_RENDER", output=str(output_path))
     render_pdf(
         english,
         config,
@@ -510,20 +807,38 @@ def convert_image(
         qr_bytes=qr_bytes,
         translation_date=translation_date,
     )
+    canonical_dict = canonical.to_translation_input()
     result = {
         "input": str(image_path),
         "output": str(output_path),
-        "fields": fields.to_dict(),
+        "trace_id": trace.trace_id,
+        "fields": canonical_dict,
         "english": english,
         "ocr": [line.to_dict() for line in lines],
         "qr_data": qr_data,
+        "canonical": canonical.to_dict(),
+        "ocr_primary": canonical.ocr_primary,
+        "ocr_actual": canonical.ocr_actual,
+        "fallback_used": canonical.fallback_used,
+        "needs_review": list(canonical.needs_review),
+        "events": trace.to_list(),
+        "status": {
+            "ocr_primary": canonical.ocr_primary,
+            "fallback_used": canonical.fallback_used,
+            "ai_validated": canonical.ai_validated,
+            "field_retries": sum(tracker.retry_count(n) for n in tracker.all_fields()),
+            "web_verified": sum(
+                1 for e in (english.get("provenance") or {}).values()
+                if isinstance(e, dict) and e.get("provider") == "web_verified"
+            ),
+            "need_review": len(canonical.needs_review),
+        },
     }
     if work_dir:
         work_dir = Path(work_dir)
         work_dir.mkdir(parents=True, exist_ok=True)
         sidecar = work_dir / (output_path.stem + ".json")
         sidecar.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        # preview of the embedded original-image page
         preview = work_dir / (output_path.stem + "-oriented.jpg")
         cv2.imencode(".jpg", display)[1].tofile(str(preview))
     LOG.info("完成  %s", output_path)
@@ -547,7 +862,7 @@ def process_license_library(
     dest_dir: str | Path,
     *,
     max_workers: int = 5,
-    engine: LicenseOCR | None = None,
+    engine: LicenseOCR | OcrService | None = None,
     log=None,
     progress=None,
     stop_event=None,
@@ -572,7 +887,7 @@ def process_license_library(
             log(f"执照库不存在: {source}", "err")
         return {"processed": 0, "failed": 0, "moved": 0, "skipped": 0}
 
-    eng = engine or LicenseOCR()
+    eng = engine or OcrService()
     company_folders = sorted([d for d in source.iterdir() if d.is_dir()])
     total = len(company_folders)
     processed = failed = moved = skipped = 0

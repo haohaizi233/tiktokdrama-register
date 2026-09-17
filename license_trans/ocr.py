@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
+import logging
 import re
+import subprocess
+import sys
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import cv2
 import numpy as np
+
+LOG = logging.getLogger("license_trans.ocr")
 
 KEYWORDS = [
     "营业执照",
@@ -22,7 +28,7 @@ KEYWORDS = [
 @dataclass
 class OcrLine:
     text: str
-    score: float
+    score: float | None
     x0: float
     y0: float
     x1: float
@@ -175,10 +181,15 @@ def _run_ocr(ocr, image: np.ndarray) -> list[OcrLine]:
             continue
         xs = [p[0] for p in box]
         ys = [p[1] for p in box]
+        conf: float | None
+        if score is None:
+            conf = None
+        else:
+            conf = float(score)
         lines.append(
             OcrLine(
                 text=text,
-                score=float(score),
+                score=conf,
                 x0=float(min(xs)),
                 y0=float(min(ys)),
                 x1=float(max(xs)),
@@ -250,14 +261,25 @@ def _iou(a: OcrLine, b: OcrLine) -> float:
     return inter / union if union > 0 else 0.0
 
 
+def _usable_score(score: float | None) -> float | None:
+    return score if isinstance(score, (int, float)) else None
+
+
 def _merge_lines(primary: list[OcrLine], secondary: list[OcrLine], iou_thresh: float = 0.3) -> list[OcrLine]:
-    """Merge two OCR line sets; for overlapping lines keep the higher-score one."""
+    """Merge two OCR line sets; for overlapping lines keep the higher-score one.
+
+    A missing confidence (WeChat) never beats a real PP-OCR score.
+    """
     result = list(primary)
     for sec in secondary:
         overlapped = False
         for i, pri in enumerate(result):
             if _iou(pri, sec) > iou_thresh:
-                if sec.score > pri.score and len(sec.text) >= len(pri.text):
+                pri_s, sec_s = _usable_score(pri.score), _usable_score(sec.score)
+                if sec_s is None:
+                    if pri_s is None and len(sec.text) > len(pri.text):
+                        result[i] = sec
+                elif pri_s is None or (sec_s > pri_s and len(sec.text) >= len(pri.text)):
                     result[i] = sec
                 overlapped = True
                 break
@@ -266,93 +288,72 @@ def _merge_lines(primary: list[OcrLine], secondary: list[OcrLine], iou_thresh: f
     return result
 
 
+# ---------------------------------------------------------------------------
+# OCR model metadata (for logging, debugging, benchmarking)
+# ---------------------------------------------------------------------------
+OCR_BACKEND_NAME = "RapidOCR"
+OCR_VERSION = "PP-OCRv6"
+OCR_MODEL_TYPE = "medium"
+OCR_ENGINE_TYPE = "onnxruntime"
+
+
 _gpu_provider: str | None = None
+
+
+def _onnx_providers(timeout: float = 5.0) -> list[str]:
+    """List ONNX Runtime providers in a child process.
+
+    Importing onnxruntime / probing CUDA EP in-process can hang on Windows.
+    A subprocess timeout always returns so callers are never stuck.
+    """
+    script = (
+        "import json,sys\n"
+        "try:\n"
+        "    import onnxruntime as ort\n"
+        "    json.dump({'p': list(ort.get_available_providers())}, sys.stdout)\n"
+        "except Exception as e:\n"
+        "    json.dump({'p': ['CPUExecutionProvider'], 'e': str(e)}, sys.stdout)\n"
+    )
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if sys.platform == "win32" else 0
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=flags,
+        )
+        data = json.loads((proc.stdout or "").strip() or "{}")
+        providers = list(data.get("p") or ["CPUExecutionProvider"])
+        return providers or ["CPUExecutionProvider"]
+    except subprocess.TimeoutExpired:
+        LOG.warning(
+            "[OCR] onnxruntime provider probe timed out after %.1ss — using CPU",
+            timeout,
+        )
+        return ["CPUExecutionProvider"]
+    except Exception:
+        LOG.exception("[OCR] onnxruntime provider probe failed")
+        return ["CPUExecutionProvider"]
 
 
 def detect_gpu_provider() -> str:
     """Detect available GPU for OCR.
 
-    Checks ONNX Runtime providers (CUDA/DirectML) and PyTorch CUDA.
+    Checks ONNX Runtime providers (CUDA/DirectML) only. Does not import
+    PyTorch — that import can hang for minutes on Windows and is not
+    required by RapidOCR / PP-OCRv6.
     Returns "CUDA", "DirectML", or "CPU".
     """
     global _gpu_provider
     if _gpu_provider is not None:
         return _gpu_provider
-    # Check ONNX Runtime providers
-    try:
-        import onnxruntime as ort
-        providers = ort.get_available_providers()
-        if "CUDAExecutionProvider" in providers:
-            _gpu_provider = "CUDA"
-            return _gpu_provider
-        if "DmlExecutionProvider" in providers:
-            _gpu_provider = "DirectML"
-            return _gpu_provider
-    except Exception:
-        pass
-    # Check PyTorch CUDA (for EasyOCR/PaddleOCR)
-    try:
-        import torch
-        if torch.cuda.is_available():
-            _gpu_provider = "CUDA"
-            return _gpu_provider
-    except Exception:
-        pass
-    _gpu_provider = "CPU"
-    return _gpu_provider
-
-
-def _patch_ort_session_for_gpu():
-    """Monkey-patch OrtInferSession to use GPU if available."""
-    provider = detect_gpu_provider()
-    if provider == "CPU":
-        return "CPU"
-    if provider not in ("CUDA", "DirectML"):
-        return "CPU"
-
-    from rapidocr_onnxruntime.utils import OrtInferSession
-    from onnxruntime import (
-        GraphOptimizationLevel, InferenceSession, SessionOptions,
-    )
-    from pathlib import Path
-
-    if provider == "CUDA":
-        ep_name = "CUDAExecutionProvider"
-        ep_opts = {
-            "device_id": 0,
-            "arena_extend_strategy": "kNextPowerOfTwo",
-            "cudnn_conv_algo_search": "EXHAUSTIVE",
-            "do_copy_in_default_stream": True,
-        }
+    providers = _onnx_providers()
+    if "CUDAExecutionProvider" in providers:
+        _gpu_provider = "CUDA"
+    elif "DmlExecutionProvider" in providers:
+        _gpu_provider = "DirectML"
     else:
-        ep_name = "DmlExecutionProvider"
-        ep_opts = {
-            "device_id": 0,
-            "arena_extend_strategy": "kSameAsRequested",
-        }
-
-    cpu_ep = "CPUExecutionProvider"
-    cpu_opts = {"arena_extend_strategy": "kSameAsRequested"}
-
-    def _patched_init(self, config):
-        sess_opt = SessionOptions()
-        sess_opt.log_severity_level = 4
-        sess_opt.enable_cpu_mem_arena = False
-        sess_opt.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
-        model_path = Path(config["model_path"])
-        if not model_path.exists():
-            raise FileNotFoundError(f"{model_path} does not exist.")
-        try:
-            self.session = InferenceSession(
-                str(model_path), sess_options=sess_opt,
-                providers=[(ep_name, ep_opts), (cpu_ep, cpu_opts)])
-        except Exception:
-            self.session = InferenceSession(
-                str(model_path), sess_options=sess_opt,
-                providers=[(cpu_ep, cpu_opts)])
-
-    OrtInferSession.__init__ = _patched_init
-    return provider
+        _gpu_provider = "CPU"
+    return _gpu_provider
 
 
 # ---------------------------------------------------------------------------
@@ -360,21 +361,82 @@ def _patch_ort_session_for_gpu():
 # ---------------------------------------------------------------------------
 
 class RapidOCREngine:
-    """Default lightweight OCR engine (PP-OCRv3 via ONNX Runtime)."""
+    """Default OCR engine — PP-OCRv6 Medium via ONNX Runtime.
 
-    name = "RapidOCR (PP-OCRv3)"
+    Uses the new ``rapidocr`` package (>=3.9.0) with explicit PP-OCRv6
+    Medium detection and recognition models.  GPU is used automatically
+    when a CUDA or DirectML provider is detected; otherwise falls back to
+    CPU.  No silent downgrade to Small/PP-OCRv5/v4/v3 is ever performed.
+    """
+
+    name = "RapidOCR · PP-OCRv6 Medium · ONNX Runtime"
 
     def __init__(self):
-        from rapidocr_onnxruntime import RapidOCR
-        self._provider = _patch_ort_session_for_gpu()
-        self._ocr = RapidOCR()
+        import logging
+        log = logging.getLogger("license_trans.ocr")
+        from rapidocr import RapidOCR, EngineType, ModelType, OCRVersion
+
+        provider = detect_gpu_provider()
+        log.info("[OCR] Initializing RapidOCR...")
+        log.info("[OCR] Engine: ONNX Runtime")
+        log.info("[OCR] Detection: PP-OCRv6 Medium")
+        log.info("[OCR] Recognition: PP-OCRv6 Medium")
+
+        params = {
+            "Det.engine_type": EngineType.ONNXRUNTIME,
+            "Det.model_type": ModelType.MEDIUM,
+            "Det.ocr_version": OCRVersion.PPOCRV6,
+            "Rec.engine_type": EngineType.ONNXRUNTIME,
+            "Rec.model_type": ModelType.MEDIUM,
+            "Rec.ocr_version": OCRVersion.PPOCRV6,
+        }
+        # Enable GPU provider when detected (new rapidocr handles this natively)
+        if provider == "CUDA":
+            params["Det.engine_cfg.use_cuda"] = True
+            params["Rec.engine_cfg.use_cuda"] = True
+            log.info("[OCR] GPU: CUDA")
+        elif provider == "DirectML":
+            params["Det.engine_cfg.use_dml"] = True
+            params["Rec.engine_cfg.use_dml"] = True
+            log.info("[OCR] GPU: DirectML")
+        else:
+            log.info("[OCR] GPU: CPU (no GPU provider detected)")
+
+        try:
+            self._ocr = RapidOCR(params=params)
+        except Exception as exc:
+            log.error("[OCR] PP-OCRv6 Medium initialization failed: %s", exc)
+            raise
+
+        log.info("[OCR] Initialization completed")
+        self._provider = provider
 
     @property
     def provider(self) -> str:
         return self._provider
 
     def __call__(self, image: np.ndarray):
-        return self._ocr(image)
+        """Run OCR and adapt RapidOCROutput → legacy (result, elapse) format.
+
+        Returns ``([(box, text, score), ...], elapse)`` matching the old
+        ``rapidocr_onnxruntime`` calling convention so that ``_run_ocr``
+        and downstream modules need no changes.
+        """
+        output = self._ocr(image)
+        # Adapter: RapidOCROutput → [(box, text, score), ...]
+        if output is None:
+            return [], 0.0
+        boxes = output.boxes
+        txts = output.txts
+        scores = output.scores
+        if boxes is None or txts is None or scores is None:
+            return [], float(output.elapse or 0.0)
+        result = []
+        for box, text, score in zip(boxes, txts, scores):
+            # box is np.ndarray shape (4, 2) — convert to list of [x, y]
+            box_list = [[float(p[0]), float(p[1])] for p in box]
+            result.append((box_list, text, float(score)))
+        return result, float(output.elapse or 0.0)
 
 
 class EasyOCREngine:
@@ -429,41 +491,181 @@ class PaddleOCREngine:
         return results, elapsed
 
 
-def _read_engine_config() -> str:
-    """Read preferred OCR engine from config.json. Returns 'auto' if unset."""
+def _patch_ort_session_for_legacy_gpu():
+    """Monkey-patch legacy rapidocr_onnxruntime OrtInferSession for GPU."""
+    provider = detect_gpu_provider()
+    if provider == "CPU":
+        return "CPU"
+    if provider not in ("CUDA", "DirectML"):
+        return "CPU"
+
+    from rapidocr_onnxruntime.utils import OrtInferSession
+    from onnxruntime import (
+        GraphOptimizationLevel, InferenceSession, SessionOptions,
+    )
+    from pathlib import Path
+
+    if provider == "CUDA":
+        ep_name = "CUDAExecutionProvider"
+        ep_opts = {
+            "device_id": 0,
+            "arena_extend_strategy": "kNextPowerOfTwo",
+            "cudnn_conv_algo_search": "EXHAUSTIVE",
+            "do_copy_in_default_stream": True,
+        }
+    else:
+        ep_name = "DmlExecutionProvider"
+        ep_opts = {
+            "device_id": 0,
+            "arena_extend_strategy": "kSameAsRequested",
+        }
+
+    cpu_ep = "CPUExecutionProvider"
+    cpu_opts = {"arena_extend_strategy": "kSameAsRequested"}
+
+    def _patched_init(self, config):
+        sess_opt = SessionOptions()
+        sess_opt.log_severity_level = 4
+        sess_opt.enable_cpu_mem_arena = False
+        sess_opt.graph_optimization_level = GraphOptimizationLevel.ORT_ENABLE_ALL
+        model_path = Path(config["model_path"])
+        if not model_path.exists():
+            raise FileNotFoundError(f"{model_path} does not exist.")
+        try:
+            self.session = InferenceSession(
+                str(model_path), sess_options=sess_opt,
+                providers=[(ep_name, ep_opts), (cpu_ep, cpu_opts)])
+        except Exception:
+            LOG.exception("[OCR] GPU EP failed, falling back to CPU")
+            self.session = InferenceSession(
+                str(model_path), sess_options=sess_opt,
+                providers=[(cpu_ep, cpu_opts)])
+
+    OrtInferSession.__init__ = _patched_init
+    return provider
+
+
+class LegacyRapidOCREngine:
+    """Original PP-OCRv3 engine via the old rapidocr_onnxruntime package.
+
+    Faster on CPU than PP-OCRv6 Medium but less accurate.  Kept as a
+    user-selectable fallback for slow machines or quick scans.
+    """
+
+    name = "RapidOCR · PP-OCRv3 (Legacy)"
+
+    def __init__(self):
+        import logging
+        log = logging.getLogger("license_trans.ocr")
+        from rapidocr_onnxruntime import RapidOCR
+        log.info("[OCR] Initializing legacy RapidOCR (PP-OCRv3)...")
+        self._provider = _patch_ort_session_for_legacy_gpu()
+        self._ocr = RapidOCR()
+        log.info("[OCR] Legacy initialization completed (provider: %s)", self._provider)
+
+    @property
+    def provider(self) -> str:
+        return self._provider
+
+    def __call__(self, image: np.ndarray):
+        return self._ocr(image)
+
+
+def detect_gpu_status(*, probe_torch: bool = False, timeout: float = 5.0) -> dict:
+    """Detect GPU availability and return detailed status info.
+
+    Skips PyTorch by default: ``import torch`` / ``torch.cuda.is_available()``
+    frequently hangs on Windows and is unused by the PP-OCRv6 path.
+    """
+    global _gpu_provider
+    providers = _onnx_providers(timeout=timeout)
+    provider = "CPU"
+    if "CUDAExecutionProvider" in providers:
+        provider = "CUDA"
+    elif "DmlExecutionProvider" in providers:
+        provider = "DirectML"
+    _gpu_provider = provider
+
+    torch_cuda = False
+    if probe_torch:
+        try:
+            import torch
+            torch_cuda = bool(torch.cuda.is_available())
+            if torch_cuda and provider == "CPU":
+                provider = "CUDA"
+                _gpu_provider = provider
+        except Exception:
+            LOG.exception("[OCR] PyTorch CUDA probe failed")
+
+    parts = [f"ONNX Runtime providers: {', '.join(providers) or 'unavailable'}"]
+    if probe_torch:
+        parts.append(f"PyTorch CUDA: {'available' if torch_cuda else 'no'}")
+    parts.append(f"Selected: {provider}")
+    return {
+        "provider": provider,
+        "providers": providers,
+        "torch_cuda": torch_cuda,
+        "detail": "\n".join(parts),
+    }
+
+
+def _read_engine_config() -> dict:
+    """Read OCR config from config.json.
+
+    Returns a dict with:
+      - "engine": ocr_engine value ("auto" / "rapidocr" / "easyocr" / "paddleocr")
+      - "model": ocr_model value ("v6_medium" / "v3" / "auto")
+    """
+    defaults = {"engine": "auto", "model": "auto"}
     try:
         from .pipeline import load_config
-        return load_config().get("ocr_engine", "auto")
+        cfg = load_config()
+        defaults["engine"] = cfg.get("ocr_engine", "auto")
+        defaults["model"] = cfg.get("ocr_model", "auto")
     except Exception:
-        return "auto"
+        LOG.exception("[OCR] failed to read engine config, using defaults")
+    return defaults
 
 
-def _create_engine(preferred: str | None = None):
+def _create_engine(preferred: str | None = None, model: str | None = None):
     """Create the best available OCR engine.
 
-    Priority when 'auto':
+    ``preferred`` overrides the engine choice (auto/rapidocr/easyocr/paddleocr).
+    ``model`` overrides the model choice (auto/v6_medium/v3) — only meaningful
+    when the engine is RapidOCR.
+
+    Priority when engine='auto':
       1. PaddleOCR (if installed) — best Chinese accuracy
       2. EasyOCR (if installed + GPU) — larger models, GPU
-      3. RapidOCR (always) — lightweight, CPU
+      3. RapidOCR (always) — PP-OCRv6 Medium by default
+
+    For RapidOCR, model='v3' selects the legacy PP-OCRv3 (faster on CPU);
+    model='v6_medium' or 'auto' selects PP-OCRv6 Medium (more accurate).
     """
-    choice = preferred or _read_engine_config()
+    cfg = _read_engine_config()
+    choice = preferred or cfg["engine"]
+    model_choice = model or cfg["model"]
 
     if choice in ("paddleocr", "paddle"):
         return PaddleOCREngine()
     if choice in ("easyocr", "easy"):
         return EasyOCREngine()
     if choice in ("rapidocr", "rapid"):
+        if model_choice == "v3":
+            return LegacyRapidOCREngine()
         return RapidOCREngine()
 
     # auto: try PaddleOCR → EasyOCR → RapidOCR
     try:
         return PaddleOCREngine()
     except ImportError:
-        pass
+        LOG.debug("PaddleOCR not installed, skipping")
     try:
         return EasyOCREngine()
     except ImportError:
-        pass
+        LOG.debug("EasyOCR not installed, skipping")
+    if model_choice == "v3":
+        return LegacyRapidOCREngine()
     return RapidOCREngine()
 
 
@@ -527,11 +729,13 @@ def _zoom_crop_pass(
 
 
 class LicenseOCR:
-    def __init__(self, engine_name: str | None = None) -> None:
-        self._engine = _create_engine(engine_name)
+    def __init__(self, engine_name: str | None = None,
+                 model: str | None = None,
+                 engine=None) -> None:
+        self._engine = engine if engine is not None else _create_engine(engine_name, model)
         self._ocr = self._engine  # _run_ocr calls ocr(image)
-        self.gpu_provider = self._engine.provider
-        self.engine_name = self._engine.name
+        self.gpu_provider = getattr(self._engine, "provider", "CPU")
+        self.engine_name = getattr(self._engine, "name", "RapidOCR")
         self._quick_cache: dict[str, list[OcrLine]] = {}
         import threading
         self._cache_lock = threading.Lock()

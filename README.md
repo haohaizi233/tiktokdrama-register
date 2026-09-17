@@ -156,4 +156,4 @@ python batch.py 照片文件夹 -o license_out --issue-date 2022-12-09
 
 - Windows + Python 3.10+（任意官方安装版；若当前解释器缺tkinter会自动寻找并切换到可用的Python）
 - playwright、openpyxl（首次运行自动安装）
-- 执照翻译另需 rapidocr-onnxruntime、opencv-python、pymupdf 等（第一次点「开始转换」自动安装）
+- 执照翻译另需 rapidocr (PP-OCRv6 Medium)、onnxruntime、opencv-python、pymupdf 等（第一次点「开始转换」自动安装）

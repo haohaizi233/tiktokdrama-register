@@ -596,7 +596,9 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
         parts = [inline] + [item.text for item in nearby]
         contributing = [key] + nearby
         if contributing:
-            field_scores[name] = min(ln.score for ln in contributing)
+            known = [ln.score for ln in contributing if ln.score is not None]
+            if known:
+                field_scores[name] = min(known)
         filtered: list[str] = []
         for part in parts:
             part = part.strip()

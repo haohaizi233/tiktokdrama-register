@@ -6,7 +6,7 @@ import argparse
 from pathlib import Path
 
 from license_trans.classify import NotFormatA
-from license_trans.ocr import LicenseOCR
+from license_trans.ocr_service import OcrService
 from license_trans.pipeline import convert_image
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
@@ -38,7 +38,7 @@ def main() -> int:
 
     out_arg = Path(args.out)
     failed = 0
-    engine = LicenseOCR()
+    engine = OcrService()
     for image in inputs:
         if out_arg.suffix.lower() == ".pdf" and len(inputs) == 1:
             output = out_arg

@@ -1,0 +1,23 @@
+# Runtime
+rapidocr>=3.9.0
+# Windows GPU: DirectML uses the NVIDIA GPU without a matching CUDA toolkit.
+# CPU-only `onnxruntime` only exposes AzureExecutionProvider + CPUExecutionProvider.
+onnxruntime-directml>=1.23.0; sys_platform == "win32"
+onnxruntime>=1.23.0; sys_platform != "win32"
+opencv-python
+pymupdf
+pillow
+cn2an
+qrcode[pil]
+pypinyin
+numpy
+translators
+openai
+protobuf==3.20.3
+
+# WeChat 4.x OCR wrapper (Windows). Pipeline falls back to PP-OCRv6 if
+# the extension cannot load or WeChat runtime is missing.
+py-wechat-ocr==0.1.1; sys_platform == "win32"
+
+# Tests
+pytest>=8.0

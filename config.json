@@ -1,5 +1,18 @@
 {
   "ocr_engine": "auto",
+  "wechat_ocr": {
+    "enabled": true,
+    "wechat_path": null,
+    "ocr_path": null,
+    "timeout": 30
+  },
+  "ai": {
+    "enabled": true,
+    "base_url": "https://api.deepseek.com/v1",
+    "api_key": "sk-2bcf81e73e5f4548a77f14a6207e4201",
+    "model": "deepseek-chat",
+    "timeout": 60
+  },
   "translator": {
     "name": "Niu Mengyuan",
     "catti_no": "20201100937000000097",
@@ -11,5 +24,6 @@
   "fonts": {
     "regular": "C:/Windows/Fonts/times.ttf",
     "bold": "C:/Windows/Fonts/timesbd.ttf"
-  }
+  },
+  "ocr_model": "v6_medium"
 }

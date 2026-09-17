@@ -591,13 +591,14 @@ class App(tk.Tk):
             self.q.put(("log", level, f"[执照] {msg}"))
 
         try:
-            from license_trans.ocr import LicenseOCR
+            from license_trans.ocr_service import OcrService
             from license_trans.pipeline import process_license_library
         except ImportError as e:
             log(f"执照翻译依赖缺失: {e}", "err")
             return
         try:
-            engine = LicenseOCR()
+            from license_trans.pipeline import load_config
+            engine = OcrService(load_config())
         except Exception as e:
             log(f"OCR 引擎加载失败: {e}", "err")
             return

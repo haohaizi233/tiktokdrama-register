@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import io
+import logging
 from datetime import date
 from pathlib import Path
 
 import fitz
 from PIL import Image
+
+LOG = logging.getLogger("license_trans.render")
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS = ROOT / "assets"
@@ -51,6 +54,7 @@ def _resolve_font(config_path: str, kind: str) -> fitz.Font:
             try:
                 return fitz.Font(fontfile=path)
             except Exception:
+                LOG.exception("Font load failed: %s", path)
                 continue
     return fitz.Font("helv")
 
@@ -249,12 +253,6 @@ def render_english_page(
         footer_y,
         6.5,
     )
-    mid = (
-        "The market entity shall submit its annual report through the National "
-        "Enterprise Credit Information Publicity System from"
-    )
-    _draw(page, regular, mid, 311.4, footer_y, 6.5)
-    _draw(page, regular, "January 1 to June 30 each year.", 429.7, 451.6, 6.5)
     _draw(
         page,
         regular,
@@ -265,6 +263,12 @@ def render_english_page(
         align="right",
         right=page_right,
     )
+    mid = (
+        "The market entity shall submit its annual report through the National "
+        "Enterprise Credit Information Publicity System from"
+    )
+    _draw(page, regular, mid, 38.4, footer_y + 13, 6.5)
+    _draw(page, regular, "January 1 to June 30 each year.", 38.4, footer_y + 26, 6.5)
 
     t = trans
     y0 = 479.0
@@ -282,7 +286,7 @@ def render_english_page(
 
     stamp = ASSETS / "stamp.png"
     if stamp.exists():
-        page.insert_image(fitz.Rect(335.8, 436.9, 446.0, 550.3), filename=str(stamp))
+        page.insert_image(fitz.Rect(335.8, 472.0, 446.0, 585.4), filename=str(stamp))
 
     signature = ASSETS / "signature.png"
     if signature.exists():

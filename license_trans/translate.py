@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import threading
 from functools import lru_cache
@@ -36,7 +37,7 @@ def _load_api_cache():
             if _API_CACHE_FILE.exists():
                 _api_cache.update(json.loads(_API_CACHE_FILE.read_text(encoding="utf-8")))
         except Exception:
-            pass
+            LOG.exception("加载翻译缓存失败")
         _api_cache_loaded = True
 
 
@@ -66,6 +67,7 @@ def _api_translate(text: str) -> str:
     if text in _api_cache:
         return _api_cache[text]
     try:
+        os.environ.setdefault("translators_default_region", "CN")
         import translators as ts
         result = ts.translate_text(
             text, from_language="zh", to_language="en",
@@ -130,6 +132,7 @@ def _try_pinyin(text: str, heteronym: bool = False) -> str:
         parts = lazy_pinyin(text, style=Style.NORMAL)
         return "".join(p.capitalize() if i == 0 else p for i, p in enumerate(parts)) if len(text) > 1 and " " not in text else " ".join(p.capitalize() for p in parts)
     except Exception:
+        LOG.debug("pypinyin failed for %r", text, exc_info=True)
         return text
 
 
@@ -146,6 +149,7 @@ def pinyin_word(text: str) -> str:
         joined = "".join(p for p in parts if p)
         return joined[:1].upper() + joined[1:] if joined else compact
     except Exception:
+        LOG.debug("pypinyin compact failed for %r", compact, exc_info=True)
         return compact
 
 
@@ -294,9 +298,11 @@ def translate_capital(text: str) -> str:
         else:
             amount = int(cn2an.cn2an(number_part, "smart"))
     except Exception:
+        LOG.debug("cn2an parse failed for %r", number_part, exc_info=True)
         try:
             amount = int(cn2an.transform(number_part + "元", "cn2an").replace("元", "") or 0)
         except Exception:
+            LOG.debug("cn2an transform failed for %r", number_part, exc_info=True)
             amount = None
     if amount is None:
         return f"{currency} {raw}"

@@ -2,7 +2,7 @@
 rem GBK encoded - do not re-save as UTF-8
 chcp 936 > nul
 cd /d "%~dp0"
-title TikTok╤л╬Гжппд вт╤╞в╒╡А╧╓╬ъ
+title TikTokО©╫л╬О©╫О©╫О©╫О©╫О©╫ О©╫т╤О©╫в╒О©╫А╧╓О©╫О©╫
 
 set "PYEXE="
 where py >nul 2>nul
@@ -17,22 +17,22 @@ if not defined PYEXE goto :nopy
 if errorlevel 1 set "PYEXE="
 if not defined PYEXE goto :nopy
 
-echo уЩтзфТ╤╞, йв╢нткпп╩Авт╤╞╟╡в╟рюю╣, гКит╨Р...
+echo О©╫О©╫О©╫О©╫О©╫О©╫О©╫О©╫, О©╫в╢О©╫О©╫О©╫О©╫п╩О©╫О©╫т╤О©╫О©╫О©╫в╟О©╫О©╫О©╫О©╫, О©╫О©╫О©╫т╨О©╫...
 %PYEXE% run_gui.py %*
 if errorlevel 1 goto :fail
 exit /b 0
 
 :nopy
 echo.
-echo [╢МнС] ╣Гдтиоц╩сп©исц╣д Python║ё
-echo гК╣╫ https://www.python.org/downloads/ обть╟╡в╟(р╩б╥д╛хообр╩╡╫),
-echo ╟╡в╟мЙЁи╨Сжьпбк╚╩В╠╬нд╪Ч╪╢©и║ё
+echo [О©╫О©╫О©╫О©╫] О©╫О©╫О©╫О©╫О©╫О©╫ц╩О©╫п©О©╫О©╫ц╣О©╫ PythonО©╫О©╫
+echo О©╫К╣╫ https://www.python.org/downloads/ О©╫О©╫О©╫ь╟О©╫в╟(р╩б╥д╛О©╫О©╫О©╫О©╫р╩О©╫О©╫),
+echo О©╫О©╫в╟О©╫О©╫и╨О©╫О©╫О©╫О©╫О©╫к╚О©╫О©╫О©╫О©╫О©╫д╪О©╫О©╫О©╫О©╫и║О©╫
 echo.
 pause
 exit /b 1
 
 :fail
 echo.
-echo [ЁЖ╢М] фТ╤╞й╖╟э, оЙо╦пео╒╪Шм╛д©б╪ gui.log, ©и╫ьм╪╥╢ю║║ё
+echo [О©╫О©╫О©╫О©╫] О©╫О©╫О©╫О©╫й╖О©╫О©╫, О©╫О©╫о╦О©╫О©╫о╒О©╫О©╫м╛д©б╪ gui.log, О©╫и╫О©╫м╪О©╫О©╫О©╫О©╫О©╫О©╫
 pause
 exit /b 1
