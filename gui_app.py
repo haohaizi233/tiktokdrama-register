@@ -6,7 +6,7 @@
 
 线程模型: 注册/认证在工作线程执行, 通过 queue 把日志/进度/完成事件发回主线程渲染。
 企业认证: 注册后自动认证(同页面免重登) 或 独立批量认证已注册账号(会话恢复, 过期自动重登);
-公司资料由 materials.py 解析(资料/文件夹), 槽位制一司最多认证5个账号, 用量自动跟踪;
+公司资料由 materials.py 解析(资料/文件夹), 槽位制默认每企业5个账号(可随政策改, 须确认), 用量自动跟踪;
 机构名由 institutions.py 管理(institutions.json 队列), 一名一用, 认证时依次分配。
 """
 import queue
@@ -281,12 +281,17 @@ class App(tk.Tk):
             bar4, values=("1", "5", "10", "20", "max"), width=5, state="readonly")
         self.cmb_count.current(0)
         self.cmb_count.pack(side="left", padx=(4, 14))
-        # 每企业可认证账号数: 平台规则固定5, 只展示不可改(2026-09-08)
+        # 默认5; 政策可变所以允许改, 必须点「应用」并确认(尤其缩小)
         ttk.Label(bar4, text="每企业认证账号数:").pack(side="left")
         self.spn_slots = ttk.Spinbox(
-            bar4, from_=1, to=9, width=3, state="disabled")
-        self.spn_slots.set(materials.COMPANY_SLOTS)
-        self.spn_slots.pack(side="left", padx=(4, 14))
+            bar4, from_=materials.MIN_COMPANY_SLOTS,
+            to=materials.MAX_COMPANY_SLOTS, width=3)
+        self.spn_slots.set(materials.get_company_slots())
+        self.spn_slots.pack(side="left", padx=(4, 4))
+        self.btn_apply_slots = ttk.Button(
+            bar4, text="应用", width=4, command=self._apply_company_slots)
+        self.btn_apply_slots.pack(side="left", padx=(0, 14))
+        self.spn_slots.bind("<Return>", lambda _e: self._apply_company_slots())
         self.btn_stop = ttk.Button(bar4, text="■ 停止", command=self.stop_register, state="disabled")
         self.btn_stop.pack(side="right", padx=8)
         self.btn_start = ttk.Button(bar4, text="▶ 开始注册", command=self.start_register)
@@ -552,9 +557,76 @@ class App(tk.Tk):
                 "归档目录: 资料/资料不全/", parent=self)
         self.refresh_pool()
 
+    def _shown_slots(self):
+        try:
+            return int(str(self.spn_slots.get()).strip())
+        except (TypeError, ValueError):
+            return None
+
+    def _slots_applied(self) -> bool:
+        """Start is blocked until the spinbox matches the persisted cap."""
+        shown = self._shown_slots()
+        cur = materials.get_company_slots()
+        if shown is None:
+            self.spn_slots.set(cur)
+            return True
+        shown = materials._clamp_slots(shown)
+        if shown != cur:
+            messagebox.showwarning(
+                "槽位数未应用",
+                f"界面显示 {shown}，但当前生效的是 {cur}。\n"
+                "请先点「应用」（会有慎重提醒），或改回后再开始。",
+                parent=self)
+            return False
+        return True
+
+    def _apply_company_slots(self):
+        if self.worker and self.worker.is_alive():
+            messagebox.showwarning(
+                "请先停止", "任务进行中不能改每企业认证账号数。", parent=self)
+            return
+        shown = self._shown_slots()
+        cur = materials.get_company_slots()
+        if shown is None:
+            messagebox.showerror(
+                "无效数字",
+                f"请输入 {materials.MIN_COMPANY_SLOTS}~{materials.MAX_COMPANY_SLOTS} 的整数。",
+                parent=self)
+            self.spn_slots.set(cur)
+            return
+        n = materials._clamp_slots(shown)
+        self.spn_slots.set(n)
+        if n == cur:
+            return
+        occ, who = materials.max_slot_occupancy()
+        msg = (
+            "默认每企业绑定 5 个账号。平台政策可能会调整，所以允许改这个数字，"
+            "但改动可能导致运行不稳定，尤其是从大改到小，不建议频繁修改。\n\n"
+            f"当前生效: {cur}    将改为: {n}\n"
+            "已占用的绑定记录不会删除。"
+        )
+        if n < cur:
+            msg += (
+                "\n\n这是缩小上限。已超过新上限的公司仍保留现有绑定，"
+                "只是不再分配新账号；本地计数可能与平台不一致。"
+            )
+            if occ > n:
+                extra = f"例如「{who}」" if who else "部分公司"
+                msg += f"\n目前{extra}已占用 {occ} 个槽，超过新上限 {n}。"
+        if not messagebox.askyesno("慎重：确认修改", msg + "\n\n确定应用？", parent=self):
+            self.spn_slots.set(cur)
+            return
+        applied = materials.set_company_slots(n)
+        self.spn_slots.set(applied)
+        self._append_log(
+            f"每企业认证账号数已改为 {applied}（原 {cur}；不建议频繁修改）", "warn")
+        self.refresh_pool()
+
     # ---------- 注册 ----------
     def start_register(self, confirm: bool = True):
         if self.worker and self.worker.is_alive():
+            return
+        if not self._slots_applied():
             return
         unused = [a for a in pool.all_accounts() if a.get("status") == "unused"]
         if not unused:
@@ -667,9 +739,10 @@ class App(tk.Tk):
                 log=log, stop_event=stop_event)
             log(
                 f"===== 执照翻译完成: 翻译 {result['processed']} / "
-                f"失败 {result['failed']} / 移动 {result['moved']} / "
+                f"失败 {result['failed']} / 仲裁未过 {result.get('review', 0)} / "
+                f"移动 {result['moved']} / "
                 f"跳过 {result['skipped']} =====",
-                "ok" if result["failed"] == 0 else "warn")
+                "ok" if result["failed"] == 0 and not result.get("review") else "warn")
         except Exception as exc:
             log(f"执照翻译异常: {exc}", "err")
 
@@ -709,6 +782,8 @@ class App(tk.Tk):
     # ---------- 独立企业认证 ----------
     def start_certify(self, confirm: bool = True):
         if self.worker and self.worker.is_alive():
+            return
+        if not self._slots_applied():
             return
         accounts = pool.all_accounts()
         targets = [a for a in accounts
@@ -1111,6 +1186,8 @@ class App(tk.Tk):
         self.btn_archive.config(state=st)
         self.btn_reclaim.config(state=st)
         self.cmb_count.config(state="disabled" if running else "readonly")
+        self.spn_slots.config(state="disabled" if running else "normal")
+        self.btn_apply_slots.config(state="disabled" if running else "normal")
         self.btn_stop.config(state="normal" if running else "disabled")
 
     def _on_close(self):

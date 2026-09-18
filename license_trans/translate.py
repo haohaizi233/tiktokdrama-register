@@ -390,9 +390,17 @@ def translate_company(text: str) -> str:
                 token = token.replace(" Province", "").replace(" City", "").replace(" District", "")
             out.append(token)
             i += len(matched)
-        else:
-            unknown.append(work[i])
-            i += 1
+            # 开平 + 市森泉 → drop the admin 市 so 森泉 is romanized, not 市森泉.
+            if (
+                matched in places
+                and i < len(work)
+                and work[i] in "市县区"
+                and not matched.endswith(work[i])
+            ):
+                i += 1
+            continue
+        unknown.append(work[i])
+        i += 1
     flush_unknown()
     # ensure Co., Ltd. if original had 公司 and we missed it
     joined = " ".join(part for part in out if part)
@@ -427,6 +435,27 @@ def _scope_tables() -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
 
 def leftover_cjk(text: str) -> list[str]:
     return _CJK_RE.findall(text or "")
+
+
+# Short OCR-garbage leftovers that AI previously translated as English
+# nonsense (日住→daily accommodation, 文县→Wen County, 花客→Flower Guest).
+_SCOPE_JUNK_FRAGMENTS = {
+    "日住", "文县", "花客", "前包", "体存", "玩且", "以量心", "优春", "我材",
+    "卫吴", "批售", "销用百货", "五金产以量心", "需要许可商品",
+}
+
+
+def is_scope_ocr_junk_fragment(text: str) -> bool:
+    t = re.sub(r"\s+", "", text or "")
+    if not t:
+        return True
+    if t in _SCOPE_JUNK_FRAGMENTS:
+        return True
+    if len(t) <= 1:
+        return True
+    if len(t) == 2 and t.endswith(("县", "住", "客", "包", "且")):
+        return True
+    return False
 
 
 def translate_noun(text: str) -> str:
@@ -649,15 +678,55 @@ def _replace_colons_outside_parens(text: str) -> str:
             out.append(ch)
         elif ch in "：" and depth == 0:
             out.append("、")
+        elif ch == ":" and depth == 0:
+            out.append("、")
         else:
             out.append(ch)
     return "".join(out)
 
 
+def english_scope_is_weak(zh: str, en: str) -> bool:
+    """Local glossary composed English that does not reflect the Chinese items."""
+    zh_c = re.sub(r"\s+", "", zh or "")
+    en_c = (en or "").strip()
+    if zh_c and not en_c:
+        return True
+    zh_biz = bool(re.search(r"销售|加工|制造|服务|批发|零售|生产|租赁|回收", zh_c))
+    en_biz = bool(re.search(
+        r"\b(?:sales?|processing|manufactur(?:e|ing)|services?|wholesale|"
+        r"retail|leas(?:e|ing)|production|planting|recycling|installation|"
+        r"repair)\b",
+        en_c,
+        re.I,
+    ))
+    if zh_biz and not en_biz:
+        return True
+    if re.search(r"[A-Za-z]\d{4,}", en_c):
+        return True
+    if re.search(r"special-purpose|creativeA\d", en_c, re.I):
+        return True
+    if re.search(r"\)\s*:|\(\s*Can\s*\)|\boffice\d", en_c, re.I):
+        return True
+    if re.search(r"live poultry\)", en_c, re.I):
+        return True
+    if re.search(r"\b\d{1,4}-\d{1,4}-\d{1,4}\b", en_c):
+        return True
+    if re.search(r"\burban and\b|\bLicensed items:\s*(?:urban|city|province)\b", en_c, re.I):
+        return True
+    if re.search(r"carry out business activities", en_c, re.I) and not en_biz:
+        return True
+    return False
+
+
 def translate_scope(text: str) -> str:
     from .parse import clip_scope_text
+    from .rule_repair import scope_text_is_plausible
 
-    compact = clip_scope_text(text or "")
+    raw = text or ""
+    if raw and not scope_text_is_plausible(raw):
+        return ""
+    compact = clip_scope_text(raw)
+    compact = compact.replace("机械零部件、零部件", "机械零件、零部件")
     phrases, _verbs, _commodities = _scope_tables()
     for key in sorted(phrases, key=len, reverse=True):
         if len(key) >= 10:
@@ -669,6 +738,13 @@ def translate_scope(text: str) -> str:
                 compact = pat.sub(f"、¤{phrases[key]}¤、", compact)
             else:
                 compact = compact.replace(key, f"、¤{phrases[key]}¤、")
+    catalog = _load("scope_catalog.json")
+    for key in sorted(catalog, key=len, reverse=True):
+        if "、" not in key or len(key) < 6 or key not in compact:
+            continue
+        en = _catalog_en(key)
+        if en:
+            compact = compact.replace(key, f"、¤{en}¤、")
     compact = _split_glued_items(compact)
     compact = re.sub(
         r"(许可经营项目|一般经营项目|许可项目|一般项目)[:：]?",
@@ -682,7 +758,7 @@ def translate_scope(text: str) -> str:
     out: list[str] = []
     for piece in pieces:
         piece = piece.strip().strip(":")
-        if not piece:
+        if not piece or _is_scope_footer_chunk(piece):
             continue
         if "¤" in piece:
             for chunk in piece.split("¤"):
@@ -711,16 +787,61 @@ def translate_scope(text: str) -> str:
     rendered = re.sub(r"([a-z])\(", r"\1 (", rendered)
     rendered = re.sub(r"\)([A-Za-z])", r") \1", rendered)
     rendered = rendered.replace("items:", "items:")
+    rendered = re.sub(r"items:\s*;\s*", "items: ", rendered)
     # API fallback for any remaining untranslated CJK chunks in scope
     leftover = _CJK_RE.findall(rendered)
     if leftover:
         for chunk in set(leftover):
             if len(chunk) >= 2:
+                if _is_scope_footer_chunk(chunk) or is_scope_ocr_junk_fragment(chunk):
+                    rendered = rendered.replace(chunk, "")
+                    continue
                 api = _api_translate(chunk)
-                if api:
+                if api and not leftover_cjk(api):
                     rendered = rendered.replace(chunk, api)
+                else:
+                    rendered = rendered.replace(chunk, "")
+    rendered = sanitize_english_scope(rendered)
     return rendered.strip(" ;")
 
+
+def _is_scope_footer_chunk(text: str) -> bool:
+    t = re.sub(r"\s+", "", text or "")
+    if re.search(
+        r"报送|年度报告|公示系统|市场主体应|信用信息|国家信用|gsxt|网址",
+        t,
+        re.I,
+    ):
+        return not any(k in t for k in ("销售", "制造", "服务", "批发", "零售", "许可项目", "一般项目"))
+    return False
+
+
+def _strip_en_scope_footer(text: str) -> str:
+    m = re.search(
+        r"(?:;\s*)?(?:"
+        r"National enterprise credit information"
+        r"|Market entities shall"
+        r"|The market entity shall submit"
+        r"|(?:https?://)?(?:www\.)?gsxt\.gov"
+        r"|Public announcement systems"
+        r"|through the country enterprise credit"
+        r")",
+        text or "",
+        re.I,
+    )
+    if m and m.start() >= 20:
+        return (text or "")[: m.start()].rstrip(" ;")
+    return text or ""
+
+
+def sanitize_english_scope(text: str) -> str:
+    """English Business Scope must not contain CJK or the printed page footer."""
+    text = _strip_en_scope_footer(text or "")
+    text = re.sub(r"https?://\S*gsxt\S*", "", text, flags=re.I)
+    text = _CJK_RE.sub("", text)
+    text = re.sub(r"\s*;\s*;", ";", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" ;,")
 
 
 STREET_SUFFIXES = (
@@ -927,12 +1048,14 @@ def translate_term(text: str) -> str:
         if start:
             return f'{translate_date(start.group(1))} to Long term'
         return 'Long term'
-    # End date lost to OCR/template: the license prints …至 (or …至____年__月__日)
-    # and the blank never survived scanning (放杖).
-    if raw.endswith(('至', '到')) or '____' in raw or re.search(r'_{2,}', raw):
+    # End date lost to OCR/template: printed as …至 年 月 日 empty boxes (长期).
+    compact = re.sub(r'[\s\u3000_—－]+', '', raw)
+    if compact.endswith(('至', '到')) or re.fullmatch(
+        r'20\d{2}年\d{1,2}月\d{1,2}日至(?:年月日)*', compact,
+    ):
         start = re.search(r'(20\d{2}年\d{1,2}月\d{1,2}日)', raw)
         if start:
-            return f'{translate_date(start.group(1))} to (blank)'
+            return f'{translate_date(start.group(1))} to Long term'
     span = re.findall(r'20\d{2}年\d{1,2}月\d{1,2}日', raw)
     if len(span) >= 2:
         return f'{translate_date(span[0])} to {translate_date(span[1])}'
@@ -973,15 +1096,19 @@ def translate_fields(fields) -> dict:
 
     prefer = places_from_usci(data.get("credit_code") or "")
     address_en = translate_address(data.get("address") or "", prefer)
-    scope = translate_scope(data.get('scope') or '')
-    if not scope:
-        zh_scope = (data.get("scope") or "").strip()
-        if zh_scope and any(k in zh_scope for k in ("项目", "分包", "销售", "租赁", "服务")):
-            scope = _api_translate(zh_scope) or scope
+    from .rule_repair import scope_text_is_plausible
+
+    zh_scope = (data.get("scope") or "").strip()
+    scope = translate_scope(zh_scope)
+    if (not scope or english_scope_is_weak(zh_scope, scope)) and scope_text_is_plausible(zh_scope):
+        api = _api_translate(zh_scope) or ""
+        if api and not leftover_cjk(api) and not english_scope_is_weak(zh_scope, api):
+            scope = api
     leftover = re.findall(r"[\u4e00-\u9fff]+", scope)
     warnings = list(data.get("warnings") or [])
     if leftover:
         warnings.append("scope_untranslated")
+    scope = sanitize_english_scope(scope)
     authority = translate_authority(data.get("authority") or "", data.get("address") or "", data.get("name") or "")
     if authority and "authority" in warnings:
         warnings.remove("authority")

@@ -67,6 +67,13 @@ OCR_FIXES = (
     ("电子元器作", "电子元器件"),
     ("医疗器销售", "医疗器械销售"),
     ("鞋销批发", "鞋批发"),
+    ("文县用品", "文具用品"),
+    ("玩且销售", "玩具销售"),
+    ("体存用品", "体育用品"),
+    ("礼品花客", "礼品花卉"),
+    ("厨具卫吴", "厨具卫具"),
+    ("器材批售", "器材批发"),
+    ("前包销售", ""),
 )
 
 NOISE_RE = re.compile(
@@ -79,6 +86,23 @@ NOISE_RE = re.compile(
 # '…市场主体自主选择经营。一般项目：…' (六盘水), and killing that row
 # drops the 一般项目 marker and flips scope into the raw-blob fallback.
 FOOTER_RE = re.compile(r"(公示|年度报告|报送|每年|gsxt|网址|监制|市场主体应当)")
+
+# Glue point where the printed page-footer starts after the last scope item.
+# OCR of this band is routinely corrupted (ittp/htp, 应当干, 行场主体, gsxtgov).
+_SCOPE_FOOTER_START_RE = re.compile(
+    r"(?:"
+    r"国家企业信用信息"
+    r"|企业信用信息公示"
+    r"|公示系统网址"
+    r"|市场主体应[当干]"
+    r"|行场主体应"
+    r"|市场主体座"
+    r"|www\.?gsxt"
+    r"|https?://[^\s]*gsxt"
+    r"|ht+p://[^\s]*gsxt"
+    r")",
+    re.I,
+)
 
 # Seal-covered fragments of the registration-authority name (e.g. "场监务"
 # of 市场监督管理局, "行政" of 江阴市行政审批局). Short runs built purely from
@@ -98,7 +122,15 @@ CREDIT_GUARDED_RE = re.compile(
     r"(?:\s*[\(（]\s*(\d+\s*-\s*\d+)\s*[\)）])?"
     r"(?![0-9A-Z])"
 )
+# Overlapping 18-char windows. Non-overlapping finditer on
+# `…UDGL91430211MA7MWFUJ1U` consumes `GL91430211MA7MWFUJ` and never
+# sees the real `91430211MA7MWFUJ1U` that starts one character later.
+CREDIT_OVERLAP_RE = re.compile(
+    r"(?=([0-9A-HJ-NPQRTUWXY]{2}\d{6}[0-9A-HJ-NPQRTUWXY]{10}))"
+)
 _USCI_WATERMARK_RE = re.compile(r"(?:SC)?JDGL", re.I)
+# Peel SCJDGL / DGL glued immediately in front of a 91- USCI.
+_USCI_GLUE_RE = re.compile(r"(?:SCJDGL|CJDGL|SCJDGI|JDGL|UDGL|DGL)(?=91)", re.I)
 DATE_RE = re.compile(r"(20\d{2})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日")
 COPY_RE = re.compile(r"[\(（]\s*(\d+\s*-\s*\d+)\s*[\)）]")
 
@@ -168,12 +200,74 @@ def _norm(text: str) -> str:
     )
 
 
+def _peel_usci_glue(text: str) -> str:
+    compact = _USCI_WATERMARK_RE.sub("", (text or "").replace(" ", ""))
+    return _USCI_GLUE_RE.sub("", compact)
+
+
+def _credit_rank_code(raw: str) -> tuple[int, int]:
+    """Prefer a real 91- company USCI over a checksum-valid watermark window.
+
+    `GL91430211MA7MWFUJ` is an overlapping window into
+    `…UDGL91430211MA7MWFUJ1U`. One confusable repair (0→D) makes the
+    G-prefix checksum pass, and the old rank treated that as a win.
+    """
+    raw = (raw or "").upper()
+    code = repair_usci(raw)
+    raw_company = is_company_usci(raw) or raw.startswith("91")
+    if checksum_ok(raw) and raw_company:
+        return (0, 0)
+    if checksum_ok(code) and is_company_usci(code) and raw_company:
+        return (0, 1)
+    if raw_company:
+        return (1, 0)
+    if checksum_ok(code) and is_company_usci(code):
+        return (2, 0)
+    if checksum_ok(code) or checksum_ok(raw):
+        return (3, 0)
+    return (4, 0)
+
+
+def iter_usci_candidates(text: str) -> list[str]:
+    found: list[str] = []
+    peeled = _peel_usci_glue(text)
+    raw = (text or "").replace(" ", "")
+    for blob in (peeled, raw):
+        if not blob:
+            continue
+        for rx in (CREDIT_GUARDED_RE, CREDIT_OVERLAP_RE):
+            for m in rx.finditer(blob):
+                found.append(m.group(1).upper())
+    out: list[str] = []
+    seen: set[str] = set()
+    for code in found:
+        if code not in seen:
+            seen.add(code)
+            out.append(code)
+    return out
+
+
+def pick_best_usci(texts: list[str], lines: list[OcrLine] | None = None) -> str:
+    """Best 18-char USCI across individual OCR lines, then the joined blob."""
+    cands: list[str] = []
+    for ln in lines or []:
+        cands.extend(iter_usci_candidates(ln.text or ""))
+    for text in texts or []:
+        cands.extend(iter_usci_candidates(text))
+    if not cands:
+        return ""
+    best = min(cands, key=_credit_rank_code)
+    return repair_usci(best)
+
+
 def _clean_value(text: str) -> str:
     text = text.strip(" :：;；|-_")
     text = re.sub(r"^(名称|类型|法定代表人|经营范围|注册资本|注册资金|成立日期|住所|营业期限|经营期限|登记机关)[:：]?", "", text)
     text = re.sub(r"^称", "", text)
     # 类型 label that lost its leading char (vertical OCR) leaves 型.
     text = re.sub(r"^型(?=[\u4e00-\u9fff])", "", text)
+    if text in ("型", "类"):
+        return ""
     return text.strip()
 
 
@@ -208,6 +302,7 @@ def clip_scope_text(text: str) -> str:
     """Drop name/type/address glued in front of 一般项目 / 许可项目."""
     compact = (text or "").replace(" ", "")
     compact = _fix_ocr_text(compact)
+    compact = re.sub(r"日住(?=用)", "日", compact)
     compact = re.sub(r"^[0-9A-HJ-NPQRTUWXY]{15,18}", "", compact)
     compact = re.sub(r"^.*?有限责任公司（自然人[^）]{0,24}）", "", compact)
     compact = re.sub(r"^.*?有限责任公司\(自然人[^)]{0,24}\)", "", compact)
@@ -225,16 +320,14 @@ def clip_scope_text(text: str) -> str:
             break
     compact = re.sub(r"副本+$", "", compact)
     compact = re.sub(r"\(?\s*副\s*本\s*\)?$", "", compact)
-    # Annual-report footer notice glued after the scope's legal-tail
-    # disclaimer. Its text is OCR-corrupted beyond keyword rescue
-    # (市场主体应当于每年… → 市场主体座尚于每平…, 宝鸡), so match the
-    # structure: the last 依法 disclaimer paren is the end of every scope
-    # section — only a new section marker may follow it.
-    tails = list(re.finditer(r"（[^（）]*依法[^（）]*）", compact))
+    # Annual-report footer glued after the last 依法 disclaimer. Match both
+    # fullwidth and ASCII parens — WeChat often emits `(除依法须经批准…)`.
+    tails = list(re.finditer(r"[（(][^（）()]*依法[^（）()]*[）)]", compact))
     if tails:
         after = compact[tails[-1].end():]
         if after and not re.match(r"^[。；;]?[：:]?(许可项目|一般项目|许可经营项目|一般经营项目)", after):
             compact = compact[:tails[-1].end()]
+    compact = _strip_scope_page_footer(compact)
     # Photo watermark timestamps and trailing digit runs (32024/11/0821:02).
     compact = re.sub(r"\d?\d20\d{2}[./-]\d{1,2}[./-]\d{1,2}\d{0,2}[:：]\d{2}[)）]?$", "", compact)
     compact = re.sub(r"\d{6,}[)）]?$", "", compact)
@@ -243,6 +336,15 @@ def clip_scope_text(text: str) -> str:
     compact = re.sub(r"(?:SCJDGL|SJDGL|CJDG|JDGL)+[（(]?$", "", compact)
     compact = re.sub(r"[（(]+$", "", compact)
     return compact.strip(" :：;；,，、")
+
+
+def _strip_scope_page_footer(text: str) -> str:
+    """Drop the printed 年报/gsxt footer when it is glued onto 经营范围."""
+    compact = text or ""
+    m = _SCOPE_FOOTER_START_RE.search(compact)
+    if m and m.start() >= 16:
+        compact = compact[: m.start()]
+    return compact.rstrip(" :：;；,，、。")
 
 
 def _label_forms(labels: tuple[str, ...]) -> list[str]:
@@ -328,7 +430,7 @@ def _reading_order(chosen: list[OcrLine], bucket: int) -> list[OcrLine]:
             rows.append([ln])
     ordered: list[OcrLine] = []
     for row in rows:
-        ordered.extend(sorted(row, key=lambda l: l.x0))
+        ordered.extend(sorted(row, key=lambda l: (l.x0, l.y0)))
     return ordered
 
 
@@ -381,7 +483,8 @@ def _lines_right_or_below(lines: list[OcrLine], key: OcrLine, stop: list[OcrLine
     return _drop_duplicate_lines(_reading_order(chosen, bucket))
 
 
-def _column_filter(nearby: list[OcrLine], key: OcrLine) -> list[OcrLine]:
+def _column_filter(nearby: list[OcrLine], key: OcrLine,
+                   page_w: float | None = None) -> list[OcrLine]:
     """Drop value lines that belong to a different field column.
 
     Old-format licenses place 住所 (right column) at the same height as the
@@ -389,6 +492,11 @@ def _column_filter(nearby: list[OcrLine], key: OcrLine) -> list[OcrLine]:
     row/below tests and pollute the scope text. Seed the scope value box
     from the line nearest the label, then keep only lines starting within
     (or just beyond) that box's horizontal extent.
+
+    A-format licenses print a lone 住 at ~0.58 of page width. Scope rows
+    themselves run to ~0.53, so `col_right + 60` lets 住 in and the join
+    becomes `批发:日` + `住` → 日住, which AI then translates as
+    "daily accommodation". Cut at page mid for scope.
     """
     if len(nearby) < 2:
         return nearby
@@ -398,7 +506,17 @@ def _column_filter(nearby: list[OcrLine], key: OcrLine) -> list[OcrLine]:
         return nearby
     col_right = max(ln.x1 for ln in cluster)
     limit = col_right + max(60.0, 0.12 * max(0.0, col_right - seed.x0))
-    return [ln for ln in nearby if ln.x0 <= limit]
+    mid = (page_w * 0.52) if page_w else None
+    kept: list[OcrLine] = []
+    for ln in nearby:
+        compact = _norm(ln.text)
+        if compact in {"住", "所"}:
+            continue
+        if mid is not None and ln.x0 > mid:
+            continue
+        if ln.x0 <= limit:
+            kept.append(ln)
+    return kept or nearby
 
 
 def _address_with_continuation(lines: list[OcrLine], base: OcrLine) -> str:
@@ -498,36 +616,10 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
     lines = [line for line in lines if not _is_noise(line)]
     blob = "".join(line.text for line in lines)
 
-    compact_blob = _USCI_WATERMARK_RE.sub("", blob.replace(" ", ""))
-    credit_matches = list(CREDIT_GUARDED_RE.finditer(compact_blob))
-    unguarded = list(CREDIT_RE.finditer(compact_blob))
-
-    def _credit_rank(m) -> tuple[int, int]:
-        raw = m.group(1)
-        code = repair_usci(raw)
-        if checksum_ok(code) and is_company_usci(code):
-            return (0, 0)
-        if checksum_ok(code):
-            return (0, 1)
-        if checksum_ok(repair_usci(raw)):
-            return (0, 2)
-        if is_company_usci(code) or raw.startswith("91"):
-            return (1, 0)
-        return (2, 0)
-
-    def _has_company_usci(matches) -> bool:
-        return any(_credit_rank(m)[0] == 0 for m in matches)
-
-    if not credit_matches or (unguarded and not _has_company_usci(credit_matches)):
-        credit_matches = credit_matches + unguarded
-
-    if credit_matches:
-        best = min(credit_matches, key=_credit_rank)
-        fields.credit_code = repair_usci(best.group(1))
+    fields.credit_code = pick_best_usci([blob], lines)
+    if fields.credit_code:
         if not checksum_ok(fields.credit_code):
             fields.warnings.append("credit_code_checksum")
-        if best.group(2):
-            fields.copy_no = re.sub(r"\s+", "", best.group(2))
     else:
         reg_no = REG_NO_RE.search(blob.replace(" ", ""))
         if reg_no:
@@ -590,10 +682,10 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
                 continue
             stops.append(k)
         max_dy = layout["max_dy_scope"] if name == "scope" else layout["max_dy_field"]
-        if name == "scope" and not stops:
-            # No in-column stop label survived the band test: the value box
-            # runs until the page footer, well past max_dy_scope (12 rows).
-            max_dy = layout["stop_fallback"]
+        if name == "scope":
+            # Dense 经营范围 runs past 12 rows (许可项目 under the 依法
+            # disclaimer). Always use the footer-distance fallback.
+            max_dy = max(max_dy, layout["stop_fallback"])
         nearby = _lines_right_or_below(lines, key, stops, max_dy=max_dy, bucket=layout["bucket"])
         if name in {"scope", "address"}:
             # Vertical seal fragments (华控's 智管理, h=219 vs ~45px rows) sit
@@ -602,7 +694,9 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
             tall = 2.5 * max(1.0, layout["line_h"])
             nearby = [ln for ln in nearby if (ln.y1 - ln.y0) <= tall]
         if name in {"scope", "address"} and nearby and not layout.get("rotated"):
-            nearby = _column_filter(nearby, key)
+            page_w = max((ln.x1 for ln in lines), default=key.x1) if name == "scope" else None
+            nearby = _column_filter(nearby, key, page_w=page_w)
+            nearby = _reading_order(nearby, layout["bucket"])
         if name not in {"scope", "address"}:
             # Short-value fields: rank lines that are row-aligned with the
             # label first, then by horizontal gap. The bucket index
@@ -657,6 +751,8 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
             # scope reach; they never belong to the value box.
             if name == "scope" and FOOTER_RE.search(compact):
                 continue
+            if name == "scope" and re.search(r"以量心|优春用总|安全系辣|心承民发", compact):
+                continue
             filtered.append(part)
         value = _clean_value("".join(filtered) if name in {"scope", "address"} else (filtered[0] if filtered else ""))
         if name in {"scope", "address"}:
@@ -666,6 +762,8 @@ def parse_license(lines: list[OcrLine]) -> LicenseFields:
     prefer = places_from_usci(fields.credit_code)
     fields.name = grab("name", ("名称", "名 称"), ("type", "legal_person"))
     fields.type = grab("type", ("类型", "类 型"), ("legal_person", "scope"))
+    if fields.type in ("型", "类", "类型"):
+        fields.type = ""
     fields.legal_person = grab("legal_person", ("法定代表人",), ("scope", "capital"))
     fields.scope = grab("scope", ("经营范围",), ("capital", "authority", "term"))
     fields.capital = grab("capital", ("注册资本", "注册资金", "实收资本"), ("established", "address"))

@@ -152,11 +152,13 @@ def infer_scope_region(image: np.ndarray, lines: list[OcrLine]) -> tuple[int, in
     h, w = image.shape[:2]
     if h < 40 or w < 40:
         return None
-    legal = addr = cap = auth = tail = None
+    legal = addr = cap = auth = tail = scope_lab = None
     for ln in lines:
         t = re.sub(r"\s+", "", ln.text or "")
         if legal is None and "法定代表人" in t:
             legal = ln
+        if scope_lab is None and (t == "经营范围" or (t.startswith("经营范围") and len(t) <= 8)):
+            scope_lab = ln
         if addr is None and (
             t.startswith("住所")
             or ((t.startswith("所") or t.startswith("住所")) and ln.x0 > w * 0.38)
@@ -182,12 +184,13 @@ def infer_scope_region(image: np.ndarray, lines: list[OcrLine]) -> tuple[int, in
         x1 = int(min(w, max(tail.x1 + tw, right_col)))
         y0 = int(legal.y1 - 8) if legal else int(max(0, tail.y0 - th * 10))
         y1 = int(min(h, tail.y1 + th * 1.8))
-    elif legal is not None:
-        lh = max(16.0, legal.y1 - legal.y0)
-        x0 = int(max(0, legal.x0 - 30))
+    elif legal is not None or scope_lab is not None:
+        anchor = scope_lab or legal
+        lh = max(16.0, anchor.y1 - anchor.y0)
+        x0 = int(max(0, (legal.x0 if legal else anchor.x0) - 30))
         x1 = int(min(w, right_col))
-        y0 = int(legal.y1)
-        y1 = int(auth.y0 - 8) if auth else int(min(h, legal.y1 + lh * 14))
+        y0 = int(scope_lab.y0 - 4) if scope_lab else int(legal.y1)
+        y1 = int(auth.y0 - 8) if auth else int(min(h, y0 + lh * 14))
     else:
         return None
     if x1 - x0 < 40 or y1 - y0 < 18:

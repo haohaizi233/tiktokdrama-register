@@ -1,6 +1,7 @@
 """Translation pipeline: local glossary → rule → verified cache → AI fragments.
 
-AI never receives a whole name/address/scope when local tokens can resolve it.
+AI never receives a whole name/address when local tokens can resolve it.
+A full 经营范围 is sent to AI only when local compose is incoherent.
 Translation validators cannot overwrite English; web verifier only upgrades
 provenance when official evidence is found.
 """
@@ -14,7 +15,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .ai_client import AIClient, PROMPT_TRANSLATION
+from .ai_client import AIClient, PROMPT_SCOPE_TRANSLATION, PROMPT_TRANSLATION
 from .trace import PipelineTrace
 from .translate import (
     GLOSSARY,
@@ -168,11 +169,39 @@ class TranslationResolver:
             if leftover and zh:
                 cached = self._resolve_fragments(field, zh, en, leftover)
                 en = cached["text"]
+                leftover = leftover_cjk(en)
                 english[field] = en
                 provider = cached["provider"]
-                verified = cached["verified"]
+                verified = cached["verified"] and not leftover
                 confidence = cached.get("confidence")
+
+            if field == "scope":
+                from .rule_repair import scope_text_is_plausible
+                from .translate import english_scope_is_weak, sanitize_english_scope
+                en = sanitize_english_scope(en)
+                english[field] = en
                 leftover = leftover_cjk(en)
+                if not scope_text_is_plausible(zh):
+                    en = ""
+                    english[field] = ""
+                    leftover = []
+                    verified = False
+                    confidence = 0.2
+                    provider = "rule"
+                elif leftover or english_scope_is_weak(zh, en):
+                    ai_en = self._ai_translate_scope(zh)
+                    if ai_en:
+                        en = sanitize_english_scope(ai_en)
+                        english[field] = en
+                        leftover = leftover_cjk(en)
+                        provider = "ai"
+                        verified = False
+                        confidence = 0.45
+                    else:
+                        verified = False
+                        confidence = min(confidence or 0.6, 0.4)
+                elif leftover:
+                    verified = False
 
             self.provenance[field] = TranslationEntry(
                 source=zh,
@@ -199,6 +228,11 @@ class TranslationResolver:
         verified = False
         confidence: float | None = 0.5
         for frag in leftover:
+            if field == "scope":
+                from .translate import _is_scope_footer_chunk, is_scope_ocr_junk_fragment
+                if _is_scope_footer_chunk(frag) or is_scope_ocr_junk_fragment(frag):
+                    text = text.replace(frag, "")
+                    continue
             if frag in _VERIFIED:
                 hit = _VERIFIED[frag]
                 text = text.replace(frag, hit.get("translation") or hit.get("translated") or "")
@@ -227,6 +261,8 @@ class TranslationResolver:
                 })
                 if self._trace:
                     self._trace.emit("AI_TRANSLATION", field=field, fragment=frag)
+            elif field == "scope":
+                text = text.replace(frag, "")
         return {"text": text, "provider": provider, "verified": verified, "confidence": confidence}
 
     def _ai_translate_fragment(self, fragment: str) -> str:
@@ -244,6 +280,31 @@ class TranslationResolver:
             return ""
         text = str(result.get("translation") or "").strip()
         if text and not leftover_cjk(text):
+            return text
+        return ""
+
+    def _ai_translate_scope(self, chinese: str) -> str:
+        """Translate a full 经营范围 when local glossary compose is incoherent."""
+        from .rule_repair import scope_text_is_plausible
+        from .translate import english_scope_is_weak
+
+        if not chinese or not self._ai.is_available() or not scope_text_is_plausible(chinese):
+            return ""
+        result = self._ai.chat_json(
+            "You translate Chinese business-license 经营范围 into formal English. "
+            "Keep 'Licensed items:' / 'General items:' section headers. "
+            "Use SAMR catalog phrasing (sales of X, processing of X). "
+            "Do not invent items. Do not translate addresses, URLs, or seal text. "
+            "Return JSON {\"translation\": \"...\"} only.",
+            json.dumps({"scope": chinese}, ensure_ascii=False),
+            temperature=0.1,
+            max_tokens=800,
+            prompt_version=PROMPT_SCOPE_TRANSLATION,
+        )
+        if not isinstance(result, dict):
+            return ""
+        text = str(result.get("translation") or "").strip()
+        if text and not leftover_cjk(text) and not english_scope_is_weak(chinese, text):
             return text
         return ""
 

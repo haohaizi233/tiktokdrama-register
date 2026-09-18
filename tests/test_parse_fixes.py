@@ -73,6 +73,25 @@ def test_snap_text_keep_len():
     assert snap_text("北京鑫翠奇缘珠宝有限责任公司", ["北京市", "北京市东城区"], keep_len=True) == "北京鑫翠奇缘珠宝有限责任公司"
 
 
+def test_parse_recovers_type_when_label_split_as_xing():
+    lines = [
+        OcrLine("营业执照", 0.9, 500, 40, 800, 90),
+        OcrLine("统一社会信用代码", 0.9, 50, 100, 220, 130),
+        OcrLine("91440783MA53XQRYXQ", 0.95, 50, 140, 280, 170),
+        OcrLine("名称", 0.9, 50, 200, 120, 230),
+        OcrLine("开平市森泉贸易有限公司", 0.9, 180, 200, 450, 230),
+        OcrLine("类", 0.9, 50, 250, 80, 280),
+        OcrLine("类型", 0.9, 50, 250, 160, 280),
+        OcrLine("型", 0.99, 130, 250, 160, 280),
+        OcrLine("有限责任公司(自然人独资)", 0.99, 180, 250, 480, 280),
+        OcrLine("法定代表人", 0.9, 50, 300, 160, 330),
+        OcrLine("陈海松", 0.9, 180, 300, 260, 330),
+    ]
+    fields = parse_license(lines)
+    assert fields.type == "有限责任公司(自然人独资)"
+    assert fields.name == "开平市森泉贸易有限公司"
+
+
 def test_capital_label_ocr_typo():
     """主册资本 (OCR of 注册资本) must be recognized as capital label."""
     lines = [

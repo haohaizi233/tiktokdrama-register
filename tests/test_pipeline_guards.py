@@ -480,10 +480,61 @@ def test_harvest_scope_from_left_column_lines():
     assert "横峰县育民" not in fields.scope
 
 
+def test_harvest_does_not_replace_good_food_scope_with_address_leak():
+    from license_trans.pipeline import _harvest_from_ocr
+    from license_trans.field_state import FieldStateTracker
+
+    good = (
+        "销售:预包装食品、散装食品(食品经营)、食用农产品(不含活禽):生产:瓶(罐)装饮用水(食品生产)"
+        "(依法须经批准的项目，经相关部门批准后方可开展经营活动。)"
+    )
+    fields = LicenseFields(
+        name="开平市森泉贸易有限公司",
+        scope=good,
+        type="型",
+        address="开平市大沙镇新星村委会新星小学办公楼旧址1号",
+        credit_code="91440783MA53XQRYXQ",
+    )
+    tracker = FieldStateTracker()
+    tracker.init_field("scope", fields.scope)
+    tracker.init_field("type", fields.type)
+    lines = [
+        OcrLine("类型", 0.9, 193, 638, 354, 673),
+        OcrLine("型", 0.9, 319, 638, 354, 673),
+        OcrLine("有限责任公司(自然人独资)", 0.99, 373, 638, 634, 667),
+        OcrLine("经营范围", 0.9, 193, 730, 354, 760),
+        OcrLine("销售:预包装食品、散装食品(食品经营)、食用农产品(不", 0.9, 373, 730, 834, 760),
+        OcrLine("含活禽):生产:瓶(罐)装饮用水(食品生产)(依法须", 0.9, 373, 765, 834, 793),
+        OcrLine("住", 0.9, 852, 752, 887, 787),
+        OcrLine("所 开平市大沙镇新星村委会新星小学", 0.9, 900, 730, 1200, 760),
+        OcrLine("办公楼旧址1号", 0.99, 1032, 772, 1180, 800),
+        OcrLine("经批准的项目，经相关部门批准后方可开展经营活动。)", 0.9, 373, 785, 814, 813),
+    ]
+    _harvest_from_ocr(fields, tracker, [ln.text for ln in lines], lines)
+    assert "预包装食品" in fields.scope
+    assert "办公楼旧址" not in fields.scope
+    assert "许可项目住" not in fields.scope
+    assert "有限责任公司" in fields.type
+    assert fields.type != "型"
+
+
+def test_snap_kaiping_city_not_district():
+    from license_trans.divisions import snap_text, places_from_usci
+
+    addr = "开平市大沙镇新星村委会新星小学办公楼旧址1号"
+    prefer = places_from_usci("91440783MA53XQRYXQ")
+    snapped = snap_text(addr, prefer)
+    assert "开平市" in snapped
+    assert "开平区" not in snapped
+    assert snap_text(addr) == snapped or "开平市" in snap_text(addr)
+
+
 def test_translate_term_keeps_long_term():
     from license_trans.translate import translate_term
     assert translate_term("2021年03月24日至长期") == "March 24, 2021 to Long term"
     assert translate_term("2021年03月24日") == "March 24, 2021"
+    assert translate_term("2019年05月07日至") == "May 7, 2019 to Long term"
+    assert "(blank)" not in translate_term("2019年05月07日至 年 月 日")
 
 
 def test_worth_field_retry_skips_valid_usci_and_authority():
@@ -499,6 +550,103 @@ def test_worth_field_retry_skips_valid_usci_and_authority():
     assert _worth_field_retry("authority", fields) is False
     assert _worth_field_retry("scope", fields) is False
 
+
+def test_g_prefix_usci_fails_rules_so_harvest_can_replace():
+    from license_trans.rule_repair import field_passes_rules
+    from license_trans.usci import checksum_ok
+
+    fake = "GL9143D211MA7MWFUJ"
+    assert checksum_ok(fake)
+    assert field_passes_rules("credit_code", fake) is False
+    assert field_passes_rules("credit_code", "91430211MA7MWFUJ1U") is True
+
+
+def test_harvest_replaces_g_prefix_usci_from_ocr_line():
+    from license_trans.pipeline import _harvest_from_ocr
+    from license_trans.field_state import FieldStateTracker
+
+    real = "91430211MA7MWFUJ1U"
+    fields = LicenseFields(name="株洲市浩航商贸有限公司", credit_code="GL9143D211MA7MWFUJ")
+    tracker = FieldStateTracker()
+    tracker.init_field("credit_code", fields.credit_code)
+    lines = [
+        OcrLine("9HO21MAMUUDGL", 0.4, 50, 134, 300, 180),
+        OcrLine(real, 0.95, 51, 140, 218, 158),
+    ]
+    _harvest_from_ocr(fields, tracker, [ln.text for ln in lines], lines)
+    assert fields.credit_code == real
+
+
+def test_jindikang_address_not_harvested_as_scope():
+    from license_trans.pipeline import _harvest_from_ocr, _harvest_scope_text
+    from license_trans.field_state import FieldStateTracker
+    from license_trans.rule_repair import field_passes_rules, scope_text_is_plausible
+
+    url = "hip:/ww.gas.gov."
+    leaked = "许可项目所陕西省宝鸡市高新开发区高新十创意大厦A座1单元0601号乐发区行审批专用章"
+    assert field_passes_rules("scope", url) is False
+    assert field_passes_rules("scope", leaked) is False
+    assert _harvest_scope_text(
+        "经营范围所陕西省宝鸡市高新开发区高新十创意大厦A座1单元0601号乐发区行审批专用章登记机关"
+    ) == ""
+
+    fields = LicenseFields(
+        name="宝鸡金迪康机械加工有限公司",
+        scope=url,
+        address="陕西省宝鸡市高新开发区高新十创意大厦A座1单元0601号",
+    )
+    tracker = FieldStateTracker()
+    tracker.init_field("scope", fields.scope)
+    lines = [
+        OcrLine("经营范围", 0.95, 313, 440, 411, 461),
+        OcrLine("经营范国人", 0.47, 312, 425, 755, 486),
+        OcrLine("所 陕西省宝鸡市高新开发区高新十", 0.97, 866, 426, 1071, 448),
+        OcrLine("创意大厦A座1单元0601号", 0.99, 893, 440, 1035, 461),
+        OcrLine("审批专用章", 0.85, 969, 520, 1052, 566),
+        OcrLine("登记机关", 0.98, 860, 533, 971, 555),
+        OcrLine("hip:/ww.gas.gov.", 0.6, 420, 666, 535, 695),
+    ]
+    _harvest_from_ocr(fields, tracker, [ln.text for ln in lines], lines)
+    assert "创意大厦" not in (fields.scope or "")
+    assert "审批专用章" not in (fields.scope or "")
+    assert scope_text_is_plausible(fields.scope or "") is False
+
+
+def test_fangzhang_address_not_harvested_as_scope():
+    from license_trans.pipeline import _harvest_from_ocr, _harvest_scope_text
+    from license_trans.field_state import FieldStateTracker
+    from license_trans.rule_repair import field_passes_rules, scope_text_is_plausible
+
+    leaked = (
+        "许可项目所山东省潍坊市诸城市密州街道和平北街清明上河园15-1-007号"
+        "方可开展经营活动)"
+    )
+    assert field_passes_rules("scope", leaked) is False
+    assert _harvest_scope_text(
+        "经营范围所山东省潍坊市诸城市密州街道和平北街清明上河园15-1-007号登记机关"
+    ) == ""
+
+    good = "销售首饰、工艺品、家具、茶叶、日用陶瓷器皿、皮革制品"
+    fields = LicenseFields(
+        name="山东放杖溪山商贸有限公司",
+        scope=leaked,
+        address="山东省潍坊市诸城市密州街道和平北街清明上河园15-1-007号",
+        term="2019年05月07日至",
+    )
+    tracker = FieldStateTracker()
+    tracker.init_field("scope", fields.scope)
+    tracker.init_field("term", fields.term)
+    lines = [
+        OcrLine("经营范围", 0.9, 40, 200, 120, 230),
+        OcrLine("销售首饰、工艺品、家具、茶叶、日用陶瓷器皿、皮革制品", 0.9, 130, 200, 480, 260),
+        OcrLine("所 山东省潍坊市诸城市密州街道和平北街", 0.9, 520, 200, 780, 230),
+        OcrLine("清明上河园15-1-007号", 0.9, 520, 230, 780, 260),
+    ]
+    _harvest_from_ocr(fields, tracker, [ln.text for ln in lines], lines)
+    assert "15-1-007" not in (fields.scope or "")
+    assert "许可项目所" not in (fields.scope or "")
+    assert "销售首饰" in (fields.scope or "")
+    assert scope_text_is_plausible(fields.scope) is True
 
 def test_ai_fills_missing_dates_from_ocr(monkeypatch):
     fields = LicenseFields(name="测试有限公司", established="", term="", issue_date="")

@@ -119,3 +119,189 @@ def test_official_catalog_long_items():
     assert leftover_cjk(en) == []
     assert "Chinese herbal medicines" in en
     assert "non-metallic mineral" in en
+
+
+def test_clip_scope_drops_annual_report_footer():
+    from license_trans.parse import clip_scope_text
+    from license_trans.translate import leftover_cjk, translate_scope
+
+    henan = (
+        "一般项目:汽车零部件及配件制造，汽车零配件批发，汽车零配件零售;"
+        "互联网销售(除销售需要许可的商品)"
+        "(除依法须经批准的项目外，凭营业执照依法自主开展经营活动)"
+        "国家企业信用信息公示系统网址ittp://www.gsxtgov.cn"
+        "市场主体应当干每年1月1日至6月30日通过/www.gsxtgov.cn"
+        "国家企业信用信息公示系统报送公示年度报告"
+    )
+    clipped = clip_scope_text(henan)
+    assert "汽车零部件" in clipped
+    assert "gsxt" not in clipped.lower()
+    assert "公示系统" not in clipped
+    assert "市场主体" not in clipped
+    assert "年度报告" not in clipped
+    en = translate_scope(henan)
+    assert "auto parts" in en.lower()
+    assert "gsxt" not in en.lower()
+    assert "annual report" not in en.lower()
+    assert "Market entities shall" not in en
+    assert "报送" not in en
+    assert leftover_cjk(en) == []
+
+
+def test_english_scope_strips_footer_and_cjk():
+    from license_trans.translate import leftover_cjk, sanitize_english_scope, translate_scope
+
+    zh = (
+        "一般项目:家具零配件销售;日用百货销售。"
+        "(除依法须经批准的项目外，凭营业执照依法自主开展经营活动)"
+        "市场主体应当于每年1月1日至6月30日通过国家企业信用信息公示系统网"
+        "http://www.gsxt.gov.cn国家信用公示系统报送公示年度报告。"
+    )
+    en = translate_scope(zh)
+    assert "furniture" in en.lower()
+    assert leftover_cjk(en) == []
+    assert "gsxt" not in en.lower()
+    assert "Market entities shall" not in en
+    assert "年度报告" not in en
+    assert "报送" not in en
+
+    mixed = (
+        "sales of furniture parts; (except for items subject to approval in accordance "
+        "with the law, business activities may be carried out independently against the "
+        "business license); Market entities shall, on an annual basis1Month1to (date)"
+        "6Month30day through the country enterprise credit informationPublic announcement "
+        "systemsNetworkhttp://www.gsxt.gov.cn国家信用Public announcement systems报送"
+        "Public announcement年度报告"
+    )
+    cleaned = sanitize_english_scope(mixed)
+    assert leftover_cjk(cleaned) == []
+    assert "gsxt" not in cleaned.lower()
+    assert "Market entities" not in cleaned
+    assert "furniture" in cleaned.lower()
+    assert "business license" in cleaned.lower()
+
+    from license_trans.parse import clip_scope_text
+
+    src = (
+        "一般项目:工业机器人制造。"
+        "(除依法须经批准的项目外，凭营业执照依法自主开展经营活动)"
+        "许可项目:航天设备制造。"
+        "(依法须经批准的项目，经相关部门批准后方可开展经营活动，具体经营项目以审批结果为准)"
+        "国家企业信用信息公示系统网址:http://www.gsxt.gov.cn"
+        "行场主体应当于每年国家信用公示系统报送公示年度报告。"
+    )
+    clipped = clip_scope_text(src)
+    assert "工业机器人制造" in clipped
+    assert "许可项目" in clipped
+    assert "航天设备制造" in clipped
+    assert "gsxt" not in clipped.lower()
+    assert "年度报告" not in clipped
+
+
+def test_ocr_fixes_stationery_and_sports_typos():
+    from license_trans.parse import clip_scope_text
+    from license_trans.translate import leftover_cjk, translate_scope
+
+    src = "一般项目:文县用品零售、体存用品及器材批发、玩且销售、礼品花客销售"
+    clipped = clip_scope_text(src)
+    assert "文具用品" in clipped
+    assert "体育用品" in clipped
+    assert "玩具销售" in clipped
+    assert "礼品花卉" in clipped
+    en = translate_scope(src)
+    assert leftover_cjk(en) == []
+    assert "Wen County" not in en
+    assert "Flower Guest" not in en
+
+
+def test_scope_drops_right_column_zhu_not_daily_accommodation():
+    from license_trans.ocr import OcrLine
+    from license_trans.parse import parse_license
+
+    lines = [
+        OcrLine("营业执照", 0.9, 300, 40, 700, 90),
+        OcrLine("统一社会信用代码", 0.9, 50, 100, 220, 130),
+        OcrLine("91430211MA7MWFUJ1U", 0.95, 50, 140, 220, 160),
+        OcrLine("名称 株洲市浩航商贸有限公司", 0.9, 55, 230, 360, 255),
+        OcrLine("类型 有限责任公司(自然人投资或控股)", 0.9, 55, 260, 400, 280),
+        OcrLine("法定代表人 李晖", 0.9, 55, 287, 206, 314),
+        OcrLine("住", 0.9, 578, 314, 596, 337),
+        OcrLine("所 湖南省株洲市天元区马家河街道新马南", 0.9, 667, 314, 996, 337),
+        OcrLine("经营范围", 0.9, 55, 319, 163, 337),
+        OcrLine("一般项目:计算机软硬件及辅助设备零售:计算机软硬件及辅助设备批发:日", 0.9, 170, 319, 528, 330),
+        OcrLine("用百货销售，文具用品零售:文具用品批发，办公用品销售:互联网销售(除", 0.9, 170, 327, 528, 339),
+        OcrLine("路266号新马金谷三期C1栋207号", 0.9, 693, 331, 953, 354),
+        OcrLine("销售需要许可的商品)办公设备耗材销售，劳动保护用品销售", 0.9, 169, 335, 528, 361),
+        OcrLine("销售:日用家电零售(除依法须经批准的项目外，凭营业执照依法自主开展经", 0.9, 170, 462, 528, 481),
+        OcrLine("费活动)许可项目:", 0.9, 170, 476, 271, 488),
+        OcrLine("，烟草制品零售", 0.9, 314, 476, 377, 488),
+        OcrLine("建设工程施工(依法须经批", 0.9, 395, 476, 528, 490),
+        OcrLine("准的项目，经相关部门批准后方可开展经营活动", 0.9, 170, 489, 388, 502),
+    ]
+    fields = parse_license(lines)
+    assert "日住" not in (fields.scope or "")
+    assert "日用百货" in (fields.scope or "")
+    assert "许可项目" in (fields.scope or "")
+    assert "烟草制品" in (fields.scope or "")
+    assert "266号" not in (fields.scope or "")
+
+
+def test_jindikang_scope_composes_machining_items():
+    src = (
+        "一般项目：机械零件、零部件加工；机械设备销售；机械零部件、零部件销售"
+        "（除依法须经批准的项目外，凭营业执照依法自主开展经营活动）。"
+    )
+    en = translate_scope(src)
+    assert leftover_cjk(en) == []
+    assert en.startswith("General items:")
+    assert "General items:;" not in en
+    assert "processing of mechanical parts" in en.lower()
+    assert "sales of machinery" in en.lower() or "sales of mechanical parts" in en.lower()
+    assert "A10601" not in en
+    assert "special-purpose" not in en.lower()
+    assert "creative" not in en.lower()
+
+
+def test_address_leak_is_not_translated_as_scope():
+    from license_trans.translate import english_scope_is_weak
+    from license_trans.rule_repair import scope_text_is_plausible
+
+    junk = "许可项目所陕西省宝鸡市高新开发区高新十创意大厦A座1单元0601号乐发区行审批专用章"
+    assert scope_text_is_plausible(junk) is False
+    assert translate_scope(junk) == ""
+    assert english_scope_is_weak(junk, "Licensed items: development creativeA10601 special-purpose")
+
+
+def test_kaiping_senquan_company_name():
+    en = translate_company("开平市森泉贸易有限公司")
+    assert "Senquan" in en
+    assert "Shisenquan" not in en
+    assert "Trading" in en
+
+
+def test_kaiping_scope_composes_food_items():
+    src = (
+        "销售:预包装食品、散装食品(食品经营)、食用农产品(不含活禽):生产:瓶(罐)装饮用水(食品生产)"
+        "(依法须经批准的项目，经相关部门批准后方可开展经营活动。)"
+    )
+    en = translate_scope(src)
+    assert leftover_cjk(en) == []
+    assert "prepackaged" in en.lower() or "pre-packaged" in en.lower() or "packaged food" in en.lower()
+    assert "live poultry" in en.lower()
+    assert "drinking water" in en.lower() or "bottled" in en.lower()
+    assert "office1" not in en.lower()
+    assert "(Can)" not in en
+    assert "Licensed items: live poultry)" not in en
+
+
+def test_kaiping_garbled_scope_is_implausible():
+    from license_trans.rule_repair import scope_text_is_plausible
+    from license_trans.translate import english_scope_is_weak
+
+    junk = "许可项目住含活禽):生产:瓶(罐)装饮用水(食品生产)(依法须办公楼旧址1号经批准的项目，经相关部门批准后方可开展经营活动。)"
+    assert scope_text_is_plausible(junk) is False
+    assert translate_scope(junk) == ""
+    assert english_scope_is_weak(
+        junk,
+        "Licensed items: live poultry):production: (Can) (Food production) ( office1， related carry out business activities)",
+    )

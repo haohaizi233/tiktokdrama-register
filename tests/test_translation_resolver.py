@@ -119,3 +119,79 @@ def test_ai_offline_local_translation_still_works():
     })
     assert english["type"]
     assert english["name"]
+
+
+def test_scope_junk_fragments_are_dropped_even_if_cached(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "license_trans.translation_resolver.AI_CACHE_FILE", tmp_path / "ai.json",
+    )
+    monkeypatch.setattr(
+        "license_trans.translation_resolver.VERIFIED_CACHE_FILE", tmp_path / "ver.json",
+    )
+    import license_trans.translation_resolver as tr
+    tr._AI_CACHE.clear()
+    tr._VERIFIED.clear()
+    tr._AI_LOADED = False
+    tr._VERIFIED_LOADED = False
+    put_ai_cache("日住", {"source": "日住", "translation": "daily accommodation", "verified": False})
+    put_ai_cache("文县", {"source": "文县", "translation": "Wen County", "verified": False})
+    put_ai_cache("花客", {"source": "花客", "translation": "Flower Guest", "verified": False})
+
+    called = []
+
+    class FakeAI:
+        def is_available(self):
+            return True
+
+        def chat_json(self, *a, **k):
+            called.append(k)
+            return {"translation": "should-not-run"}
+
+    resolver = TranslationResolver({"ai": {"enabled": False}})
+    resolver._ai = FakeAI()
+    out = resolver._resolve_fragments(
+        "scope", "日住文县花客", "日住 文县 花客", ["日住", "文县", "花客"],
+    )
+    assert "daily accommodation" not in out["text"]
+    assert "Wen County" not in out["text"]
+    assert "Flower Guest" not in out["text"]
+    assert leftover_cjk(out["text"]) == []
+    assert called == []
+
+
+def test_resolver_does_not_verify_address_leaked_as_scope():
+    resolver = TranslationResolver({"ai": {"enabled": False}})
+    chinese = {
+        "scope": "许可项目所陕西省宝鸡市高新开发区高新十创意大厦A座1单元0601号乐发区行审批专用章",
+        "warnings": [],
+    }
+    english = resolver.translate(chinese)
+    assert english.get("scope") in ("", None)
+    entry = resolver.provenance["scope"]
+    assert entry.verified is False
+    assert "creativeA" not in (english.get("scope") or "")
+    assert "A10601" not in (english.get("scope") or "")
+
+
+def test_resolver_ai_rewrites_weak_scope_compose():
+    class FakeAI:
+        def is_available(self):
+            return True
+
+        def chat_json(self, *a, **k):
+            return {
+                "translation": (
+                    "General items: processing of mechanical parts and components; "
+                    "sales of machinery and equipment; sales of mechanical parts and components"
+                )
+            }
+
+    resolver = TranslationResolver({"ai": {"enabled": False}})
+    resolver._ai = FakeAI()
+    zh = (
+        "一般项目：机械零件、零部件加工；机械设备销售；机械零部件、零部件销售"
+        "（除依法须经批准的项目外，凭营业执照依法自主开展经营活动）"
+    )
+    out = resolver._ai_translate_scope(zh)
+    assert "processing of mechanical parts" in out
+    assert leftover_cjk(out) == []

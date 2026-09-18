@@ -776,9 +776,13 @@ class LicensePage(ttk.Frame):
             _log_ocr_health(log, engine)
             total = len(images)
             by_dir: dict[str, list[tuple[Path, list]]] = {}
+            id_by_dir: dict[str, list[tuple[Path, list, str]]] = {}
             scanned = 0
             completed = 0
             from concurrent.futures import ThreadPoolExecutor, as_completed
+            from license_trans.id_card import (
+                already_id_copy, classify_id_side, named_id_side,
+            )
             with ThreadPoolExecutor(max_workers=quick_workers) as pool:
                 futures = {pool.submit(engine.quick_detect, img): img for img in images}
                 for fut in as_completed(futures):
@@ -800,9 +804,20 @@ class LicensePage(ttk.Frame):
                         by_dir.setdefault(key, []).append((img_path, lines))
                         scanned += 1
                         log(f"  ✓ 执照  {img_path.name}  ({len(lines)} 行)", "ok")
+                    else:
+                        if already_id_copy(img_path) and not img_path.stem.startswith(("id-", "id_")):
+                            pass
+                        else:
+                            side = classify_id_side(lines) or named_id_side(img_path)
+                            if side:
+                                key = str(img_path.parent.resolve())
+                                id_by_dir.setdefault(key, []).append((img_path, lines, side))
                     self.q.put(("detect_progress", completed, total, img_path.name, is_license))
                     if completed % 20 == 0:
                         log(f"  进度 {completed}/{total}  已找到 {scanned} 张执照", "dim")
+            from license_trans.pipeline import _commit_best_ids
+            for dir_path, cands in id_by_dir.items():
+                _commit_best_ids(cands, log)
             # Pick best license per directory
             best_per_dir: list[Path] = []
             for dir_path, candidates in by_dir.items():
@@ -886,6 +901,8 @@ class LicensePage(ttk.Frame):
             self.q.put(("scan_done",
                          result["processed"], result["failed"],
                          result["moved"], result["skipped"]))
+            if result.get("review"):
+                log(f"AI仲裁未通过 {result['review']} 家, 已写入 中国执照库/待人工处理.xlsx", "warn")
         finally:
             detach_logs()
 

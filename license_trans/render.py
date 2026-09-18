@@ -23,6 +23,17 @@ QR_HINT = [
     "permission and supervision.",
 ]
 
+BORDER_LEFT = 32.85
+BORDER_TOP = 66.0
+BORDER_RIGHT = 809.05
+DEFAULT_AUTH_Y = 375.0
+DEFAULT_FOOTER_Y = 436.0
+DEFAULT_CERT_Y = 479.0
+DEFAULT_BORDER_BOTTOM = 433.0
+FIELD_Y = 192.0
+FIELD_LEADING = 20.3
+FIELD_SIZE = 10.4
+
 
 def _font(path: str) -> fitz.Font:
     return fitz.Font(fontfile=path)
@@ -134,6 +145,47 @@ def _draw_lines(
     return y
 
 
+def compute_english_layout(
+    *,
+    n_scope_lines: int,
+    n_addr_lines: int,
+    has_term: bool,
+    scope_leading: float = FIELD_LEADING,
+    field_y: float = FIELD_Y,
+    leading: float = FIELD_LEADING,
+) -> dict:
+    """Place Registration Authority / footer below a long Business Scope.
+
+    Short licenses keep the printed A4-landscape positions. Long scope flows
+    downward on the same page (page height grows); it is not moved onto a
+    second sheet.
+    """
+    scope_top = field_y + leading * 3
+    scope_end = scope_top + max(int(n_scope_lines), 1) * scope_leading
+    right_y = field_y + leading * 2
+    if has_term:
+        right_y += leading
+    right_end = right_y + max(int(n_addr_lines), 1) * leading
+    content_end = max(scope_end, right_end)
+
+    auth_y = DEFAULT_AUTH_Y
+    if content_end + 12.0 > auth_y:
+        auth_y = content_end + 14.0
+    footer_y = auth_y + (DEFAULT_FOOTER_Y - DEFAULT_AUTH_Y)
+    cert_y = footer_y + (DEFAULT_CERT_Y - DEFAULT_FOOTER_Y)
+    border_bottom = footer_y - (DEFAULT_FOOTER_Y - DEFAULT_BORDER_BOTTOM)
+    page_h = max(PAGE_H, cert_y + (PAGE_H - DEFAULT_CERT_Y))
+    return {
+        "page_h": page_h,
+        "border_bottom": border_bottom,
+        "auth_y": auth_y,
+        "footer_y": footer_y,
+        "cert_y": cert_y,
+        "scope_end": scope_end,
+        "content_end": content_end,
+    }
+
+
 def _make_qr(payload: str) -> bytes:
     import qrcode
 
@@ -153,21 +205,49 @@ def render_english_page(
     qr_bytes: bytes | None = None,
     translation_date: date | None = None,
 ) -> fitz.Page:
-    page = doc.new_page(width=PAGE_W, height=PAGE_H)
     regular = _resolve_font(config.get("fonts", {}).get("regular", ""), "regular")
     bold = _resolve_font(config.get("fonts", {}).get("bold", ""), "bold")
     trans = config["translator"]
     when = translation_date or date.today()
-    date_text = when.strftime("%B %d, %Y").replace(" 0", " ")
-    if date_text[date_text.index(" ") + 1] == "0":
-        pass
-    # January 05 → January 5
     month, day, year = when.strftime("%B"), str(when.day), str(when.year)
     date_text = f"{month} {day}, {year}"
 
-    # border
-    border = fitz.Rect(32.85, 66.0, 809.05, 433.0)
-    page.draw_rect(border, color=(0, 0, 0), width=0.5)
+    left_x = 43.9
+    right_x = 490.6
+    col_right = 479.8
+    page_right = 803.4
+    size = FIELD_SIZE
+    leading = FIELD_LEADING
+    y = FIELD_Y
+    left_width = col_right - left_x
+
+    from .translate import sanitize_english_scope
+    scope_body = sanitize_english_scope(en.get("scope") or "").replace("General items:", "\nGeneral items:")
+    scope_full = f"Business Scope: {scope_body}".strip()
+    scope_size = size
+    scope_lines = _wrap(scope_full, regular, scope_size, left_width)
+    # Keep a readable size; extremely long scope still flows down rather
+    # than being crushed into the printed box.
+    while scope_size > 9.0 and len(scope_lines) > 28:
+        scope_size -= 0.5
+        scope_lines = _wrap(scope_full, regular, scope_size, left_width)
+    scope_leading = leading if scope_size >= size else leading * (scope_size / size)
+
+    addr_width = page_right - right_x
+    addr_lines = _wrap("Address: " + (en.get("address") or ""), regular, size, addr_width)
+    layout = compute_english_layout(
+        n_scope_lines=len(scope_lines),
+        n_addr_lines=len(addr_lines),
+        has_term=bool(en.get("term")),
+        scope_leading=scope_leading,
+    )
+
+    page = doc.new_page(width=PAGE_W, height=layout["page_h"])
+    page.draw_rect(
+        fitz.Rect(BORDER_LEFT, BORDER_TOP, BORDER_RIGHT, layout["border_bottom"]),
+        color=(0, 0, 0),
+        width=0.5,
+    )
 
     emblem = ASSETS / "emblem.jpg"
     if emblem.exists():
@@ -195,56 +275,26 @@ def render_english_page(
         _draw(page, regular, line, 651.2, y_hint, 7.5)
         y_hint += 15.6
 
-    left_x = 43.9
-    right_x = 490.6
-    col_right = 479.8
-    page_right = 803.4
-    size = 10.4
-    leading = 20.3
-    y = 192.0
-
-    left_width = col_right - left_x
-    name_line = f"Name: {en.get('name') or ''}"
-    type_line = f"Type: {en.get('type') or ''}"
-    legal_line = f"Legal Representative: {en.get('legal_person') or ''}"
-    scope_body = (en.get("scope") or "").replace("General items:", "\nGeneral items:")
-    scope_full = f"Business Scope: {scope_body}".strip()
-
-    # Auto-shrink font if scope text is too long, to prevent footer overlap
-    max_scope_lines = 11  # y=192+3*20+11*20 = ~472, before footer at 436
-    scope_size = size
-    while scope_size > 7.0:
-        scope_lines = _wrap(scope_full, regular, scope_size, left_width)
-        if len(scope_lines) <= max_scope_lines:
-            break
-        scope_size -= 0.5
-    scope_lines = _wrap(scope_full, regular, scope_size, left_width)
-    scope_leading = leading if scope_size >= size else leading * (scope_size / size)
-
-    _draw(page, regular, name_line, left_x, y, size)
-    _draw(page, regular, type_line, left_x, y + leading, size)
-    _draw(page, regular, legal_line, left_x, y + leading * 2, size)
+    _draw(page, regular, f"Name: {en.get('name') or ''}", left_x, y, size)
+    _draw(page, regular, f"Type: {en.get('type') or ''}", left_x, y + leading, size)
+    _draw(page, regular, f"Legal Representative: {en.get('legal_person') or ''}", left_x, y + leading * 2, size)
     _draw_lines(page, regular, scope_lines, left_x, y + leading * 3, scope_size, scope_leading)
 
-    cap_line = f"Registered Capital: {en.get('capital') or ''}"
-    est_line = f"Date of Establishment: {en.get('established') or ''}"
-    addr_prefix = "Address: "
-    addr_width = page_right - right_x
-    addr_lines = _wrap(addr_prefix + (en.get("address") or ""), regular, size, addr_width)
-    _draw(page, regular, cap_line, right_x, y, size)
-    _draw(page, regular, est_line, right_x, y + leading, size)
+    _draw(page, regular, f"Registered Capital: {en.get('capital') or ''}", right_x, y, size)
+    _draw(page, regular, f"Date of Establishment: {en.get('established') or ''}", right_x, y + leading, size)
     right_y = y + leading * 2
     if en.get("term"):
         _draw(page, regular, f"Business Term: {en['term']}", right_x, right_y, size)
         right_y += leading
     _draw_lines(page, regular, addr_lines, right_x, right_y, size, leading)
 
-    _draw(page, regular, "Registration Authority", 0, 375.0, size, align="right", right=page_right)
-    authority = en.get("authority") or ""
-    _draw(page, regular, authority, 0, 395.0, size, align="right", right=page_right)
-    _draw(page, regular, en.get("issue_date") or "", 0, 415.0, size, align="right", right=page_right)
+    auth_y = layout["auth_y"]
+    page_right = 803.4
+    _draw(page, regular, "Registration Authority", 0, auth_y, size, align="right", right=page_right)
+    _draw(page, regular, en.get("authority") or "", 0, auth_y + 20.0, size, align="right", right=page_right)
+    _draw(page, regular, en.get("issue_date") or "", 0, auth_y + 40.0, size, align="right", right=page_right)
 
-    footer_y = 436.0
+    footer_y = layout["footer_y"]
     _draw(
         page,
         regular,
@@ -271,26 +321,27 @@ def render_english_page(
     _draw(page, regular, "January 1 to June 30 each year.", 38.4, footer_y + 26, 6.5)
 
     t = trans
-    y0 = 479.0
+    y0 = layout["cert_y"]
+    dy = y0 - DEFAULT_CERT_Y
     cert = (
         f"I, {t['name']}, translator of {t['organization']}, confirm this is a true "
         "and accurate translation of the original document."
     )
     _draw(page, regular, cert, 28.3, y0, 7.5)
-    _draw(page, regular, f"CATTI Certificate No.: {t['catti_no']}", 28.3, 489.0, 7.5)
-    _draw(page, regular, f"Organization: {t['organization']}", 196.3, 489.0, 7.5)
-    _draw(page, regular, f"Tel: {t['tel']}  Email: {t['email']}", 28.3, 499.0, 7.5)
-    _draw(page, regular, f"Organization Address: {t['address']}", 28.3, 509.0, 7.5)
-    _draw(page, regular, "Signature:", 28.3, 518.0, 7.5)
-    _draw(page, regular, f"Date of Translation: {date_text}", 188.0, 518.0, 7.5)
+    _draw(page, regular, f"CATTI Certificate No.: {t['catti_no']}", 28.3, 489.0 + dy, 7.5)
+    _draw(page, regular, f"Organization: {t['organization']}", 196.3, 489.0 + dy, 7.5)
+    _draw(page, regular, f"Tel: {t['tel']}  Email: {t['email']}", 28.3, 499.0 + dy, 7.5)
+    _draw(page, regular, f"Organization Address: {t['address']}", 28.3, 509.0 + dy, 7.5)
+    _draw(page, regular, "Signature:", 28.3, 518.0 + dy, 7.5)
+    _draw(page, regular, f"Date of Translation: {date_text}", 188.0, 518.0 + dy, 7.5)
 
     stamp = ASSETS / "stamp.png"
     if stamp.exists():
-        page.insert_image(fitz.Rect(335.8, 472.0, 446.0, 585.4), filename=str(stamp))
+        page.insert_image(fitz.Rect(335.8, 472.0 + dy, 446.0, 585.4 + dy), filename=str(stamp))
 
     signature = ASSETS / "signature.png"
     if signature.exists():
-        page.insert_image(fitz.Rect(64.7, 515.5, 160.0, 539.0), filename=str(signature))
+        page.insert_image(fitz.Rect(64.7, 515.5 + dy, 160.0, 539.0 + dy), filename=str(signature))
 
     return page
 

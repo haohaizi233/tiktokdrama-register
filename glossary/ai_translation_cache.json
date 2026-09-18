@@ -58,5 +58,551 @@
     "translation": "Co., Ltd.",
     "verified": false,
     "provider": "ai"
+  },
+  "机": {
+    "source": "机",
+    "translation": "machine",
+    "verified": false,
+    "provider": "ai"
+  },
+  "成": {
+    "source": "成",
+    "translation": "become",
+    "verified": false,
+    "provider": "ai"
+  },
+  "外": {
+    "source": "外",
+    "translation": "foreign",
+    "verified": false,
+    "provider": "ai"
+  },
+  "禁止或限项目": {
+    "source": "禁止或限项目",
+    "translation": "Prohibited or restricted items",
+    "verified": false,
+    "provider": "ai"
+  },
+  "发动机": {
+    "source": "发动机",
+    "translation": "Engine",
+    "verified": false,
+    "provider": "ai"
+  },
+  "螺旋菜": {
+    "source": "螺旋菜",
+    "translation": "Spiral vegetable",
+    "verified": false,
+    "provider": "ai"
+  },
+  "国家": {
+    "source": "国家",
+    "translation": "National",
+    "verified": false,
+    "provider": "ai"
+  },
+  "公示": {
+    "source": "公示",
+    "translation": "Public announcement",
+    "verified": false,
+    "provider": "ai"
+  },
+  "网址": {
+    "source": "网址",
+    "translation": "Website",
+    "verified": false,
+    "provider": "ai"
+  },
+  "行场主体应当于每年国家信用公示": {
+    "source": "行场主体应当于每年国家信用公示",
+    "translation": "Market entities shall, each year, [file] with the National Credit Information Publicity [System]",
+    "verified": false,
+    "provider": "ai"
+  },
+  "报送公示年度报告": {
+    "source": "报送公示年度报告",
+    "translation": "Submit and publicize the annual report",
+    "verified": false,
+    "provider": "ai"
+  },
+  "日住": {
+    "source": "日住",
+    "translation": "daily accommodation",
+    "verified": false,
+    "provider": "ai"
+  },
+  "需要许可商品": {
+    "source": "需要许可商品",
+    "translation": "Goods requiring a license",
+    "verified": false,
+    "provider": "ai"
+  },
+  "销用百货": {
+    "source": "销用百货",
+    "translation": "Department Store",
+    "verified": false,
+    "provider": "ai"
+  },
+  "文县": {
+    "source": "文县",
+    "translation": "Wen County",
+    "verified": false,
+    "provider": "ai"
+  },
+  "五金产以量心": {
+    "source": "五金产以量心",
+    "translation": "Hardware products with quality as the core",
+    "verified": false,
+    "provider": "ai"
+  },
+  "我材": {
+    "source": "我材",
+    "translation": "I material",
+    "verified": false,
+    "provider": "ai"
+  },
+  "体存": {
+    "source": "体存",
+    "translation": "body preservation",
+    "verified": false,
+    "provider": "ai"
+  },
+  "批售": {
+    "source": "批售",
+    "translation": "wholesale",
+    "verified": false,
+    "provider": "ai"
+  },
+  "市场主体应当干每年": {
+    "source": "市场主体应当干每年",
+    "translation": "Market entities shall, every year",
+    "verified": false,
+    "provider": "ai"
+  },
+  "月": {
+    "source": "月",
+    "translation": "Month",
+    "verified": false,
+    "provider": "ai"
+  },
+  "品": {
+    "source": "品",
+    "translation": "Product",
+    "verified": false,
+    "provider": "ai"
+  },
+  "日至": {
+    "source": "日至",
+    "translation": "to (date)",
+    "verified": false,
+    "provider": "ai"
+  },
+  "玩且": {
+    "source": "玩且",
+    "translation": "play and",
+    "verified": false,
+    "provider": "ai"
+  },
+  "日通过": {
+    "source": "日通过",
+    "translation": "day passed",
+    "verified": false,
+    "provider": "ai"
+  },
+  "空调": {
+    "source": "空调",
+    "translation": "Air conditioning",
+    "verified": false,
+    "provider": "ai"
+  },
+  "花客": {
+    "source": "花客",
+    "translation": "Flower Guest",
+    "verified": false,
+    "provider": "ai"
+  },
+  "前包": {
+    "source": "前包",
+    "translation": "front bag",
+    "verified": false,
+    "provider": "ai"
+  },
+  "凭营业执照依法自主开展经": {
+    "source": "凭营业执照依法自主开展经",
+    "translation": "Conduct business independently in accordance with the law based on the business license",
+    "verified": false,
+    "provider": "ai"
+  },
+  "销": {
+    "source": "销",
+    "translation": "sell",
+    "verified": false,
+    "provider": "ai"
+  },
+  "装印搬运": {
+    "source": "装印搬运",
+    "translation": "Loading, printing, and handling",
+    "verified": false,
+    "provider": "ai"
+  },
+  "上石方": {
+    "source": "上石方",
+    "translation": "Earthwork excavation and filling",
+    "verified": false,
+    "provider": "ai"
+  },
+  "市场主体应当于每年": {
+    "source": "市场主体应当于每年",
+    "translation": "Market entities shall, on an annual basis",
+    "verified": false,
+    "provider": "ai"
+  },
+  "日通过国家": {
+    "source": "日通过国家",
+    "translation": "day through the country",
+    "verified": false,
+    "provider": "ai"
+  },
+  "网": {
+    "source": "网",
+    "translation": "Network",
+    "verified": false,
+    "provider": "ai"
+  },
+  "国家信用公示": {
+    "source": "国家信用公示",
+    "translation": "National Credit Information Publicity",
+    "verified": false,
+    "provider": "ai"
+  },
+  "项目": {
+    "source": "项目",
+    "translation": "Project",
+    "verified": false,
+    "provider": "ai"
+  },
+  "经": {
+    "source": "经",
+    "translation": "via",
+    "verified": false,
+    "provider": "ai"
+  },
+  "围部门批准后方可": {
+    "source": "围部门批准后方可",
+    "translation": "only after approval by the surrounding departments",
+    "verified": false,
+    "provider": "ai"
+  },
+  "初级农产": {
+    "source": "初级农产",
+    "translation": "Primary agricultural products",
+    "verified": false,
+    "provider": "ai"
+  },
+  "可自主衣法": {
+    "source": "可自主衣法",
+    "translation": "May independently handle matters in accordance with the law",
+    "verified": false,
+    "provider": "ai"
+  },
+  "清商铺": {
+    "source": "清商铺",
+    "translation": "Clear Shop",
+    "verified": false,
+    "provider": "ai"
+  },
+  "洁": {
+    "source": "洁",
+    "translation": "clean",
+    "verified": false,
+    "provider": "ai"
+  },
+  "教育": {
+    "source": "教育",
+    "translation": "Education",
+    "verified": false,
+    "provider": "ai"
+  },
+  "等需取得许可": {
+    "source": "等需取得许可",
+    "translation": "etc. require obtaining a license",
+    "verified": false,
+    "provider": "ai"
+  },
+  "国务院决定规定禁止不得经背": {
+    "source": "国务院决定规定禁止不得经背",
+    "translation": "Those prohibited from being operated by decisions of the State Council",
+    "verified": false,
+    "provider": "ai"
+  },
+  "国务院决定规定应当许可": {
+    "source": "国务院决定规定应当许可",
+    "translation": "Approval is required as stipulated by the decisions of the State Council",
+    "verified": false,
+    "provider": "ai"
+  },
+  "审批面由": {
+    "source": "审批面由",
+    "translation": "The approval scope is determined by",
+    "verified": false,
+    "provider": "ai"
+  },
+  "恐久销彬": {
+    "source": "恐久销彬",
+    "translation": "Fear prolonged sales decline",
+    "verified": false,
+    "provider": "ai"
+  },
+  "水分没各": {
+    "source": "水分没各",
+    "translation": "moisture content not specified",
+    "verified": false,
+    "provider": "ai"
+  },
+  "自然入独资": {
+    "source": "自然入独资",
+    "translation": "natural person sole proprietorship",
+    "verified": false,
+    "provider": "ai"
+  },
+  "劳动": {
+    "source": "劳动",
+    "translation": "Labor",
+    "verified": false,
+    "provider": "ai"
+  },
+  "你": {
+    "source": "你",
+    "translation": "you",
+    "verified": false,
+    "provider": "ai"
+  },
+  "开": {
+    "source": "开",
+    "translation": "open",
+    "verified": false,
+    "provider": "ai"
+  },
+  "品实结售": {
+    "source": "品实结售",
+    "translation": "Product Settlement and Sales",
+    "verified": false,
+    "provider": "ai"
+  },
+  "白行车": {
+    "source": "白行车",
+    "translation": "Bicycle",
+    "verified": false,
+    "provider": "ai"
+  },
+  "里": {
+    "source": "里",
+    "translation": "in",
+    "verified": false,
+    "provider": "ai"
+  },
+  "需售": {
+    "source": "需售",
+    "translation": "for sale",
+    "verified": false,
+    "provider": "ai"
+  },
+  "首年新车": {
+    "source": "首年新车",
+    "translation": "first-year new vehicle",
+    "verified": false,
+    "provider": "ai"
+  },
+  "经销": {
+    "source": "经销",
+    "translation": "Distribution",
+    "verified": false,
+    "provider": "ai"
+  },
+  "注渗": {
+    "source": "注渗",
+    "translation": "Note: Infiltration",
+    "verified": false,
+    "provider": "ai"
+  },
+  "移动遗": {
+    "source": "移动遗",
+    "translation": "Mobile Remains",
+    "verified": false,
+    "provider": "ai"
+  },
+  "康装": {
+    "source": "康装",
+    "translation": "Kangzhuang",
+    "verified": false,
+    "provider": "ai"
+  },
+  "辅科售": {
+    "source": "辅科售",
+    "translation": "Auxiliary materials sales",
+    "verified": false,
+    "provider": "ai"
+  },
+  "精售": {
+    "source": "精售",
+    "translation": "Fine retail",
+    "verified": false,
+    "provider": "ai"
+  },
+  "签售": {
+    "source": "签售",
+    "translation": "book signing",
+    "verified": false,
+    "provider": "ai"
+  },
+  "个": {
+    "source": "个",
+    "translation": "individual/piece",
+    "verified": false,
+    "provider": "ai"
+  },
+  "视香庆": {
+    "source": "视香庆",
+    "translation": "Shixiangqing",
+    "verified": false,
+    "provider": "ai"
+  },
+  "告": {
+    "source": "告",
+    "translation": "announcement",
+    "verified": false,
+    "provider": "ai"
+  },
+  "法": {
+    "source": "法",
+    "translation": "Law",
+    "verified": false,
+    "provider": "ai"
+  },
+  "禁止或限制项目": {
+    "source": "禁止或限制项目",
+    "translation": "Prohibited or restricted items",
+    "verified": false,
+    "provider": "ai"
+  },
+  "项目外": {
+    "source": "项目外",
+    "translation": "Outside the project",
+    "verified": false,
+    "provider": "ai"
+  },
+  "除依法": {
+    "source": "除依法",
+    "translation": "except in accordance with law",
+    "verified": false,
+    "provider": "ai"
+  },
+  "型": {
+    "source": "型",
+    "translation": "type",
+    "verified": false,
+    "provider": "ai"
+  },
+  "不住含": {
+    "source": "不住含",
+    "translation": "not including",
+    "verified": false,
+    "provider": "ai"
+  },
+  "瓶装饮用水": {
+    "source": "瓶装饮用水",
+    "translation": "Bottled drinking water",
+    "verified": false,
+    "provider": "ai"
+  },
+  "网类": {
+    "source": "网类",
+    "translation": "network category",
+    "verified": false,
+    "provider": "ai"
+  },
+  "服": {
+    "source": "服",
+    "translation": "clothing",
+    "verified": false,
+    "provider": "ai"
+  },
+  "旷": {
+    "source": "旷",
+    "translation": "Kuang",
+    "verified": false,
+    "provider": "ai"
+  },
+  "元": {
+    "source": "元",
+    "translation": "yuan",
+    "verified": false,
+    "provider": "ai"
+  },
+  "位息": {
+    "source": "位息",
+    "translation": "position information",
+    "verified": false,
+    "provider": "ai"
+  },
+  "凭营业执照": {
+    "source": "凭营业执照",
+    "translation": "With business license",
+    "verified": false,
+    "provider": "ai"
+  },
+  "自主开展": {
+    "source": "自主开展",
+    "translation": "independently carry out",
+    "verified": false,
+    "provider": "ai"
+  },
+  "行政商": {
+    "source": "行政商",
+    "translation": "Administrative Business",
+    "verified": false,
+    "provider": "ai"
+  },
+  "部门批准后方可": {
+    "source": "部门批准后方可",
+    "translation": "Only after approval by the department",
+    "verified": false,
+    "provider": "ai"
+  },
+  "登记机女登记机": {
+    "source": "登记机女登记机",
+    "translation": "Registration Authority",
+    "verified": false,
+    "provider": "ai"
+  },
+  "日": {
+    "source": "日",
+    "translation": "day",
+    "verified": false,
+    "provider": "ai"
+  },
+  "日国家": {
+    "source": "日国家",
+    "translation": "Japan National",
+    "verified": false,
+    "provider": "ai"
+  },
+  "国家市场监督": {
+    "source": "国家市场监督",
+    "translation": "State Administration for Market Regulation",
+    "verified": false,
+    "provider": "ai"
+  },
+  "总局监制": {
+    "source": "总局监制",
+    "translation": "Supervised by the General Administration",
+    "verified": false,
+    "provider": "ai"
+  },
+  "方可": {
+    "source": "方可",
+    "translation": "only then may",
+    "verified": false,
+    "provider": "ai"
   }
 }

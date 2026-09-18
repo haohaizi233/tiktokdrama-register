@@ -5,24 +5,24 @@
   该邮箱已有 assigned/failed 绑定则续上, 不新占槽位/机构名
 - certify_page(): 纯表单操作(导航+填表+上传+提交), 不管理公司用量
 - Certifier: 批量为已注册账号做认证(独立浏览器+会话恢复/过期重登)
-- 公司资料来自 materials.py, 槽位制一司最多5号, usage.json 跟踪各槽绑定
+- 公司资料来自 materials.py, 槽位制默认每企业5号(可随政策改), usage.json 跟踪各槽绑定
 - 机构名称来自 institutions.py 机构名库队列(一名一用, 不再使用企业名)
 - 认证结果写回号池: cert_status / cert_company / cert_at / cert_error
 
-填写策略(2026-09-08业务规则: PDF识别准、证件照片识别不准、冲突以人工录入为准):
-① 先上传除证件正反面外的三组文件(企业证明PDF→地址证明→CP575), 企业字段靠PDF识别
-   静默回填(字段为空不弹冲突窗); ② 人工补填: 代表人4字段用表格值强制覆盖(照片OCR
-   回填的杂值不信任), 企业字段仅在识别没填时用表格值兜底; ③ 最后上传证件正反面,
-   识别与已填内容冲突时一律「保留当前填写」。
+填写策略:
+① 先上传除证件正反面外的三组文件(企业证明PDF→地址证明→代表人证明), 企业字段靠PDF识别
+   静默回填; ② 补填机构名/国家等。代表人4字段: 表格(xlsx F~I)有值才先填, 随后上传证件
+   冲突「保留当前填写」; 表格没有身份证信息则不预填, 上传后以站点识别为准(冲突「应用识别」)。
+   企业字段仅在识别没填时用资料兜底; ③ 最后上传证件正反面。
 
 表单结构(2026-09-06 实测 /cooperation/enterprise/create, Semi Design控件):
 - 机构信息: institutionName(文本)
-- 企业信息: enterpriseQualification(上传·单文件=州注册证明)
-  enterpriseNameLocal/En, registrationNumber, registrationCountry(下拉=美国)
+- 企业信息: enterpriseQualification(上传·单文件=州注册证明 / 中国英译执照)
+  enterpriseNameLocal/En, registrationNumber, registrationCountry(下拉=美国/中国)
   registrationProvince/City/Address(文本), isLongTerm(勾选长期→免填expirationDate)
 - 代表人: identityDocuments(上传·多文件=证件正反面), legalName, birthDate(日期控件)
-  idNumber, idExpirationDate(日期控件)+isIdLongTerm(勾选长期), idContent(单选: 国籍/地址/两者都有→驾照含地址选"地址")
-  addressProof(上传=证件正面, 驾照含居住地址可作地址证明), representativeProof(上传=CP575, 含公司名+代表人+地址)
+  idNumber, idExpirationDate(日期控件)+isIdLongTerm(勾选长期), idContent(单选: 国籍/地址/两者都有→驾照与身份证正面均含住址, 选"地址")
+  addressProof(上传=证件正面), representativeProof(上传=CP575 或中国英译执照)
 
 字段ID已2026-09-07在线dump逐一核对(19个字段全吻合, 含residentialMaterialInfo.addressProof)
 """
@@ -47,7 +47,7 @@ HOME_URL = "https://www.tiktokdramacenter.com/home"
 CREATE_URL = "https://www.tiktokdramacenter.com/cooperation/enterprise/create/"
 UA = registrar.UA
 COUNTRY = "美国"
-ID_CONTENT = "地址"  # 证件为美国驾照, 含地址字段
+ID_CONTENT = "地址"  # 美国驾照正面 / 中国身份证正面均含住址
 
 
 class CertError(RuntimeError):
@@ -816,46 +816,72 @@ def certify_page(page, profile: dict, *, log=None, stop_event=None,
     form = _Form(page, log)
     _check_stop(stop_event)
 
+    cn = profile.get("workflow") == "cn"
+    license_pdf = profile["biz_proof"]
+    rep_proof = profile.get("cp575") or license_pdf
+    id_front = profile["id_front"]
+    id_back = profile["id_back"]
+    country = "中国" if cn else COUNTRY
+    preset = materials.has_id_preset(profile)
+    if cn:
+        log("  中国工作流: 英译执照作企业/代表人证明"
+            + ("，代表人按表格先填" if preset else "，代表人无表格值, 上传后以站点识别为准"),
+            "dim")
+
     # --- ① 上传先行(除证件正反面): 企业字段靠PDF识别静默回填(字段为空不弹冲突窗) ---
     form.upload("enterpriseMaterialInfo.enterpriseQualification",
-                [profile["biz_proof"]], "企业营业证明")
+                [license_pdf], "企业营业证明")
     form.wait_ocr_done("企业文件识别", stop_event=stop_event)
-    # 地址证明=证件正面(美国驾照正面含居住地址, 与证件上传同图; 选了"地址"单选后
-    # 此文件与证件信息自洽)。先传: 此时代表人字段尚空, 即使照片OCR回填了杂值,
-    # 也会在②被表格值强制覆盖
+    # 地址证明: 美国驾照正面 / 中国身份证正面(含住址)
     form.upload("residentialMaterialInfo.addressProof",
-                [profile["id_front"]], "地址证明(证件正面)")
+                [id_front], "地址证明(证件正面)")
     form.wait_ocr_done("地址证明识别", stop_event=stop_event)
     form.upload("residentialMaterialInfo.representativeProof",
-                [profile["cp575"]], "代表人证明(CP575)")
+                [rep_proof], "代表人证明(英译执照)" if cn else "代表人证明(CP575)")
     form.wait_ocr_done("代表人证明识别", stop_event=stop_event)
     _check_stop(stop_event)
 
-    # --- ② 人工补填: 自此所有识别冲突一律「保留当前填写」(人工录入优先) ---
-    form.conflict_keep = True
+    # --- ② 补填: 有表格身份证才预填代表人; 企业字段识别优先、资料兜底 ---
+    form.conflict_keep = preset
     # force覆盖: 换公司重跑时机构名框残留上一轮旧名(goto不带ID的create/
     # 后仅机构名不清空, 2026-09-10用户实测), 库分配名优先于页面残留
     form.fill_text("institutionName", institution, "机构名称", force=True)
-    form.pick_country()
+    form.pick_country(country)
     if form._read_value(form._input("enterpriseMaterialInfo.expirationDate")):
         log("  营业执照有效期已由识别填写, 不勾选长期有效", "dim")
     else:
         form.check_box("enterpriseMaterialInfo.isLongTerm", "营业执照长期有效")
     form.pick_radio("residentialMaterialInfo.idContent", ID_CONTENT, "证件包含内容")
-    # 代表人4字段: 表格录入为准(照片识别不准), 强制覆盖识别回填的杂值
-    form.fill_text("residentialMaterialInfo.legalName", profile["rep_name"],
-                   "姓名(全名)", force=True)
-    form.fill_date("residentialMaterialInfo.birthDate", profile["rep_birth"], "出生日期")
-    form.fill_text("residentialMaterialInfo.idNumber", profile["id_no"],
-                   "证件号", force=True)
-    form.fill_date("residentialMaterialInfo.idExpirationDate", profile["id_exp"], "证件有效期")
-    # 企业字段: 以PDF识别为准; 识别没填才用表格值兜底(5列精简表无这些列=纯依赖识别)
-    form.fill_text("enterpriseMaterialInfo.enterpriseNameLocal", name, "企业名称(当地语言)")
-    form.fill_text("enterpriseMaterialInfo.enterpriseNameEn", name, "企业名称(英语)")
-    form.fill_text("enterpriseMaterialInfo.registrationNumber", profile["reg_no"], "企业注册编号")
-    form.fill_text("enterpriseMaterialInfo.registrationProvince", profile["reg_state"], "省/州")
-    form.fill_text("enterpriseMaterialInfo.registrationCity", profile["reg_city"], "城市")
-    form.fill_text("enterpriseMaterialInfo.registrationAddress", profile["reg_addr"], "企业注册地址")
+    if cn:
+        local_name = profile.get("name_zh") or name
+        en_name = profile.get("name_en") or ""
+        form.fill_text("enterpriseMaterialInfo.enterpriseNameLocal", local_name, "企业名称(当地语言)")
+        form.fill_text("enterpriseMaterialInfo.enterpriseNameEn", en_name, "企业名称(英语)")
+        form.fill_text("enterpriseMaterialInfo.registrationNumber", profile.get("reg_no"), "企业注册编号")
+        form.fill_text("enterpriseMaterialInfo.registrationProvince", profile.get("reg_state"), "省/州")
+        form.fill_text("enterpriseMaterialInfo.registrationCity", profile.get("reg_city"), "城市")
+        form.fill_text("enterpriseMaterialInfo.registrationAddress", profile.get("reg_addr"), "企业注册地址")
+    else:
+        form.fill_text("enterpriseMaterialInfo.enterpriseNameLocal", name, "企业名称(当地语言)")
+        form.fill_text("enterpriseMaterialInfo.enterpriseNameEn", name, "企业名称(英语)")
+        form.fill_text("enterpriseMaterialInfo.registrationNumber", profile["reg_no"], "企业注册编号")
+        form.fill_text("enterpriseMaterialInfo.registrationProvince", profile["reg_state"], "省/州")
+        form.fill_text("enterpriseMaterialInfo.registrationCity", profile["reg_city"], "城市")
+        form.fill_text("enterpriseMaterialInfo.registrationAddress", profile["reg_addr"], "企业注册地址")
+    if preset:
+        log("  代表人: 表格有身份证信息, 先填再上传, 冲突保留已填", "dim")
+        form.fill_text("residentialMaterialInfo.legalName", profile.get("rep_name"),
+                       "姓名(全名)", force=True)
+        form.fill_date("residentialMaterialInfo.birthDate", profile.get("rep_birth"), "出生日期")
+        form.fill_text("residentialMaterialInfo.idNumber", profile.get("id_no"),
+                       "证件号", force=True)
+        if profile.get("id_long_term"):
+            form.check_box("residentialMaterialInfo.isIdLongTerm", "证件长期有效")
+        else:
+            form.fill_date("residentialMaterialInfo.idExpirationDate",
+                           profile.get("id_exp"), "证件有效期")
+    else:
+        log("  代表人: 表格无身份证信息, 上传证件后以站点识别为准", "dim")
     # 企业必填字段核对: PDF识别未回填且表格未提供时提前报错(比提交时表单校验
     # 报错更可诊断; 该PDF的识别有问题, 需人工核查该份资料)
     _ENT_REQUIRED = (
@@ -873,11 +899,31 @@ def certify_page(page, profile: dict, *, log=None, stop_event=None,
         raise CertError("企业字段识别未回填且表格未提供: " + "、".join(missing))
     _check_stop(stop_event)
 
-    # --- ③ 证件正反面最后上传: 识别与已填内容不一致弹冲突窗时「保留当前填写」 ---
+    # --- ③ 证件正反面最后上传 ---
+    # 有表格值: 冲突「保留当前填写」; 无表格值: 冲突「应用识别结果」
     form.upload("residentialMaterialInfo.identityDocuments",
-                [profile["id_front"], profile["id_back"]], "身份证件(正反面)")
+                [id_front, id_back], "身份证件(正反面)")
     form.wait_ocr_done("证件识别", stop_event=stop_event)
     _check_stop(stop_event)
+    _ID_REQUIRED = [
+        ("residentialMaterialInfo.legalName", "姓名(全名)"),
+        ("residentialMaterialInfo.idNumber", "证件号"),
+        ("residentialMaterialInfo.birthDate", "出生日期"),
+    ]
+    missing_id = [lbl for fid, lbl in _ID_REQUIRED
+                  if not form._read_value(form._input(fid))]
+    exp = form._read_value(form._input("residentialMaterialInfo.idExpirationDate"))
+    long_cls = ""
+    try:
+        long_cls = form.page.locator(
+            _css_id("residentialMaterialInfo.isIdLongTerm")).get_attribute("class") or ""
+    except Exception:
+        long_cls = ""
+    if not exp and "semi-checkbox-checked" not in long_cls:
+        missing_id.append("证件有效期")
+    if missing_id:
+        raise CertError(("身份证识别未回填: " if not preset else "证件字段未填: ")
+                        + "、".join(missing_id))
     if shoot:
         shoot(page, "cert_filled")
 
@@ -999,7 +1045,7 @@ def certify_page(page, profile: dict, *, log=None, stop_event=None,
 def certify_account(page, email: str, *, log=None, stop_event=None, shoot=None) -> str:
     """在已登录page上为email绑定一家可用公司+分配一个机构名并完成认证提交。
 
-    自动维护公司用量(usage.json槽位制, 一司最多5号)、机构名用量
+    自动维护公司用量(usage.json槽位制, 每企业 COMPANY_SLOTS 号)、机构名用量
     (institutions.json, 一名一用)和号池认证状态。
     机构名优先续上该邮箱未终态绑定, 否则从队列队首分配 unused。
     未提交失败释放回队首复用; 提交成功终态绑定;
@@ -1013,6 +1059,11 @@ def certify_account(page, email: str, *, log=None, stop_event=None, shoot=None) 
     upload_timeouts = 0  # 上传前端60s超时重跑次数
     on_form = False  # 上一轮goto全新表单成功, 本轮跳过侧栏导航
     while True:
+        try:
+            from license_trans.pipeline import ensure_cn_reserve
+            ensure_cn_reserve(log=log, stop_event=stop_event)
+        except Exception as e:
+            log(f"  预翻译中国执照失败: {e}", "warn")
         profile = materials.pick_company_for(email)
         if not profile:
             raise CertError("无可用公司槽位(全部用满或资料不全, 见 资料/usage.json)")

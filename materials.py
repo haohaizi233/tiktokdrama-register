@@ -11,7 +11,7 @@
   (证件照片识别不准, 必须表格录入)
 - 资料/{公司名}/     该公司文件: 州注册文件(AOG/注册回执/Correspondence)、CP575、证件照片
 - 资料/overrides.json 可选, 人工指定文件角色: {"公司名": {"id_front": "文件名", ...}}
-- 资料/usage.json    自动维护, 槽位制: {公司: [{email,status,at,note}...]}, 一司最多5号
+- 资料/usage.json    自动维护, 槽位制: {公司: [{email,status,at,note}...]}, 默认每企业5号(可改)
 
 文件角色自动识别规则:
 - 州注册文件(企业营业证明): 文件名含 "-AOG-" > "Business Entity Filing Acknowledgment" > "Correspondence"
@@ -111,6 +111,9 @@ def _match_biz_proof(files: list[Path]) -> Path | None:
     for f in files:
         if "correspondence" in f.name.lower():
             return f
+    for f in files:
+        if "英文版" in f.name and f.suffix.lower() == ".pdf":
+            return f
     return None
 
 
@@ -121,20 +124,45 @@ def _match_cp575(files: list[Path]) -> Path | None:
     return None
 
 
+def _match_en_license_pdf(files: list[Path]) -> Path | None:
+    for f in files:
+        if "英文版" in f.name and f.suffix.lower() == ".pdf":
+            return f
+    return None
+
+
+def _pick_named_id(files: list[Path], side: str) -> Path | None:
+    if not files:
+        return None
+    canon = [f for f in files if f.stem in (f"id-{side}", f"id_{side}")]
+    if canon:
+        return canon[0]
+    return files[0]
+
+
 def _match_id_images(images: list[Path]) -> dict:
-    """证件照识别: front/back/selfie 命名 或 1/2/3 数字命名"""
+    """证件照识别: id-正面/id-反面 优先, 其次 *-正面/*-反面, front/back, 或 1/2/3 数字命名"""
     out = {"id_front": None, "id_back": None, "id_selfie": None}
+    fronts: list[Path] = []
+    backs: list[Path] = []
     rest = []
     for f in images:
+        stem = f.stem
         low = f.name.lower()
-        if low.startswith("front"):
-            out["id_front"] = f
+        if stem.endswith("-正面") or stem.endswith("_正面"):
+            fronts.append(f)
+        elif stem.endswith("-反面") or stem.endswith("_反面"):
+            backs.append(f)
+        elif low.startswith("front"):
+            out["id_front"] = out["id_front"] or f
         elif low.startswith("back"):
-            out["id_back"] = f
+            out["id_back"] = out["id_back"] or f
         elif low.startswith("selfie"):
             out["id_selfie"] = out["id_selfie"] or f
         else:
             rest.append(f)
+    out["id_front"] = out["id_front"] or _pick_named_id(fronts, "正面")
+    out["id_back"] = out["id_back"] or _pick_named_id(backs, "反面")
     if not out["id_front"]:
         for f in rest:
             if re.match(r"^1\.(jpg|jpeg|png|webp)$", f.name, re.I):
@@ -176,47 +204,83 @@ def _apply_overrides(company: str, files: dict) -> dict:
     return files
 
 
-# ---------- 公司档案 ----------
+def _cjk_name(name: str) -> bool:
+    return bool(re.search(r"[\u4e00-\u9fff]", name or ""))
 
-def profiles() -> list[dict]:
-    """全部公司档案(含文件与数据校验结果), 按xlsx行序"""
-    result = []
-    for row in load_xlsx_rows():
-        company = _norm_text(row.get("company"))
-        if not company:
-            continue
-        p = {
-            "name": company,
-            "reg_no": _norm_text(row.get("reg_no")),
-            "reg_state": _norm_text(row.get("reg_state")).upper(),
-            "reg_city": _norm_text(row.get("reg_city")).title(),
-            "reg_addr": _norm_text(row.get("reg_addr")),
-            "rep_name": _norm_text(row.get("rep_name")).title(),
-            "rep_birth": _norm_date(row.get("rep_birth")),
-            "id_no": _norm_text(row.get("id_no")),
-            "id_exp": _norm_date(row.get("id_exp")),
-            "rep_state": _norm_text(row.get("rep_state")).upper(),
-            "rep_city": _norm_text(row.get("rep_city")).title(),
-            "rep_addr": _norm_text(row.get("rep_addr")),
-            "folder": None,
-            "biz_proof": None, "cp575": None,
-            "id_front": None, "id_back": None, "id_selfie": None,
-            "issues": [],
-        }
-        folder = find_folder(company)
-        if not folder:
-            p["issues"].append("资料文件夹不存在")
-        else:
-            p["folder"] = str(folder)
-            files = [f for f in folder.iterdir() if f.is_file()]
-            images = [f for f in files if f.suffix.lower() in IMG_EXTS]
-            p["biz_proof"] = _match_biz_proof(files)
-            p["cp575"] = _match_cp575(files)
-            p.update(_match_id_images(images))
-            p = _apply_overrides(company, p)
+
+def has_id_preset(profile: dict) -> bool:
+    """xlsx F~I 提供了代表人姓名+证件号 → 认证时先填再上传; 否则上传后靠站点识别。"""
+    return bool(str(profile.get("rep_name") or "").strip()
+                and str(profile.get("id_no") or "").strip())
+
+
+def _load_cn_meta(folder: Path) -> dict:
+    path = folder / "cn_meta.json"
+    data = _read_json(path, {})
+    return data if isinstance(data, dict) else {}
+
+
+def _profile_from_folder(folder: Path, row: dict | None = None, *, workflow: str = "us") -> dict:
+    row = row or {}
+    company = _norm_text(row.get("company") or folder.name)
+    p = {
+        "name": company,
+        "workflow": workflow,
+        "name_zh": "",
+        "name_en": "",
+        "reg_no": _norm_text(row.get("reg_no")),
+        "reg_state": _norm_text(row.get("reg_state")).upper(),
+        "reg_city": _norm_text(row.get("reg_city")).title(),
+        "reg_addr": _norm_text(row.get("reg_addr")),
+        "rep_name": _norm_text(row.get("rep_name")).title(),
+        "rep_birth": _norm_date(row.get("rep_birth")),
+        "id_no": _norm_text(row.get("id_no")),
+        "id_exp": _norm_date(row.get("id_exp")),
+        "id_long_term": False,
+        "rep_state": _norm_text(row.get("rep_state")).upper(),
+        "rep_city": _norm_text(row.get("rep_city")).title(),
+        "rep_addr": _norm_text(row.get("rep_addr")),
+        "folder": str(folder),
+        "biz_proof": None, "cp575": None,
+        "id_front": None, "id_back": None, "id_selfie": None,
+        "issues": [],
+    }
+    files = [f for f in folder.iterdir() if f.is_file()]
+    images = [f for f in files if f.suffix.lower() in IMG_EXTS]
+    p["biz_proof"] = _match_biz_proof(files)
+    p["cp575"] = _match_cp575(files)
+    p.update(_match_id_images(images))
+    p = _apply_overrides(company, p)
+    if workflow == "cn":
+        meta = _load_cn_meta(folder)
+        p["name_zh"] = meta.get("name_zh") or ""
+        p["name_en"] = meta.get("name_en") or ""
+        p["reg_no"] = p["reg_no"] or meta.get("credit_code") or ""
+        p["reg_state"] = p["reg_state"] or _norm_text(meta.get("reg_state"))
+        p["reg_city"] = p["reg_city"] or _norm_text(meta.get("reg_city"))
+        p["reg_addr"] = p["reg_addr"] or meta.get("address_en") or meta.get("address_zh") or ""
+        # 身份证字段只采用表格(xlsx F~I); 本地 OCR / 法定代表人名不写入填表槽。
+        # 没有表格值时认证引擎直接上传, 交给站点识别。
+        en_pdf = _match_en_license_pdf(files)
+        if en_pdf:
+            p["biz_proof"] = en_pdf
+            p["cp575"] = en_pdf
+        elif p["biz_proof"] and not p["cp575"]:
+            p["cp575"] = p["biz_proof"]
+        for k in ("biz_proof", "id_front", "id_back"):
+            if not p[k]:
+                p["issues"].append(f"缺少文件:{k}")
         today = date.today().isoformat()
-        # 必需字段=代表人4项(照片识别不准, 必须表格录入)+公司名;
-        # reg_*不再必需(2026-09-08: 企业字段以PDF识别回填为准, 旧表有值则作兜底)
+        meta_exp = _norm_date(meta.get("id_exp"))
+        meta_long = bool(meta.get("id_long_term"))
+        if p["rep_birth"] and p["rep_birth"] >= today:
+            p["issues"].append("出生日期异常")
+        if (p["id_exp"] or meta_exp) and not (p["id_long_term"] or meta_long):
+            exp = p["id_exp"] or meta_exp
+            if exp <= today:
+                p["issues"].append(f"证件有效期已过期({exp})")
+    else:
+        today = date.today().isoformat()
         for k in ("rep_name", "rep_birth", "id_no", "id_exp"):
             if not p[k]:
                 p["issues"].append(f"缺少数据:{k}")
@@ -227,9 +291,65 @@ def profiles() -> list[dict]:
         for k in ("biz_proof", "cp575", "id_front", "id_back"):
             if not p[k]:
                 p["issues"].append(f"缺少文件:{k}")
-        p["complete"] = not p["issues"]
-        result.append(p)
-    # 同名去重(后者覆盖)
+    p["complete"] = not p["issues"]
+    return p
+
+
+def cn_folder_profiles() -> list[dict]:
+    """Chinese-named folders in 资料/ that came from 中国执照库 (英文版 PDF)."""
+    if not MATERIALS_DIR.is_dir():
+        return []
+    skip = {"资料不全"}
+    result = []
+    for d in sorted(MATERIALS_DIR.iterdir(), key=lambda p: p.name):
+        if not d.is_dir() or d.name in skip or not _cjk_name(d.name):
+            continue
+        result.append(_profile_from_folder(d, {"company": d.name}, workflow="cn"))
+    return result
+
+
+# ---------- 公司档案 ----------
+
+def profiles() -> list[dict]:
+    """全部公司档案(含文件与数据校验结果), 按xlsx行序, 再追加中文文件夹。"""
+    result = []
+    for row in load_xlsx_rows():
+        company = _norm_text(row.get("company"))
+        if not company:
+            continue
+        folder = find_folder(company)
+        if not folder:
+            p = {
+                "name": company,
+                "workflow": "us",
+                "name_zh": "",
+                "name_en": "",
+                "reg_no": _norm_text(row.get("reg_no")),
+                "reg_state": _norm_text(row.get("reg_state")).upper(),
+                "reg_city": _norm_text(row.get("reg_city")).title(),
+                "reg_addr": _norm_text(row.get("reg_addr")),
+                "rep_name": _norm_text(row.get("rep_name")).title(),
+                "rep_birth": _norm_date(row.get("rep_birth")),
+                "id_no": _norm_text(row.get("id_no")),
+                "id_exp": _norm_date(row.get("id_exp")),
+                "id_long_term": False,
+                "rep_state": _norm_text(row.get("rep_state")).upper(),
+                "rep_city": _norm_text(row.get("rep_city")).title(),
+                "rep_addr": _norm_text(row.get("rep_addr")),
+                "folder": None,
+                "biz_proof": None, "cp575": None,
+                "id_front": None, "id_back": None, "id_selfie": None,
+                "issues": ["资料文件夹不存在"],
+                "complete": False,
+            }
+            result.append(p)
+            continue
+        workflow = "cn" if _cjk_name(company) else "us"
+        result.append(_profile_from_folder(folder, row, workflow=workflow))
+    names = {p["name"] for p in result}
+    for p in cn_folder_profiles():
+        if p["name"] not in names:
+            result.append(p)
     dedup = {}
     for p in result:
         dedup[p["name"]] = p
@@ -238,12 +358,69 @@ def profiles() -> list[dict]:
 
 # ---------- 用量跟踪(槽位制: 一司最多 COMPANY_SLOTS 号) ----------
 
-COMPANY_SLOTS = 5  # 一个企业最多认证5个账号(2026-09-08用户确认, 机构名仍一名一用)
+DEFAULT_COMPANY_SLOTS = 5
+MIN_COMPANY_SLOTS = 1
+MAX_COMPANY_SLOTS = 20
+# 可变: 平台政策可能调整。改小不会删已占用槽, 但该公司不再分新号。
+COMPANY_SLOTS = DEFAULT_COMPANY_SLOTS
 _OPEN_SLOT = ("assigned", "failed")  # 未终态: 崩溃残留 / 提交未确认, 重试必须续上
 
 
 class SlotFullError(RuntimeError):
     """写入新槽位时该公司已满(同邮箱更新不走这条)"""
+
+
+def _slots_file() -> Path:
+    return ROOT / "company_slots.json"
+
+
+def _clamp_slots(n) -> int:
+    try:
+        v = int(n)
+    except (TypeError, ValueError):
+        return DEFAULT_COMPANY_SLOTS
+    return max(MIN_COMPANY_SLOTS, min(MAX_COMPANY_SLOTS, v))
+
+
+def get_company_slots() -> int:
+    return _clamp_slots(COMPANY_SLOTS)
+
+
+def max_slot_occupancy(usage: dict | None = None) -> tuple[int, str]:
+    """Highest per-company slot count in usage.json. Returns (count, company)."""
+    usage = load_usage() if usage is None else usage
+    best, who = 0, ""
+    for company, slots in (usage or {}).items():
+        n = len(slots or [])
+        if n > best:
+            best, who = n, company
+    return best, who
+
+
+def set_company_slots(n: int) -> int:
+    """Persist the per-company cap and update the live module value.
+
+    Shrinking does not drop existing usage rows; companies already over the
+    new cap simply get no new assignments.
+    """
+    global COMPANY_SLOTS
+    COMPANY_SLOTS = _clamp_slots(n)
+    _write_json(_slots_file(), {
+        "slots": COMPANY_SLOTS,
+        "default": DEFAULT_COMPANY_SLOTS,
+    })
+    return COMPANY_SLOTS
+
+
+def reload_company_slots() -> int:
+    global COMPANY_SLOTS
+    data = _read_json(_slots_file(), {})
+    raw = data.get("slots") if isinstance(data, dict) else None
+    COMPANY_SLOTS = _clamp_slots(raw if raw is not None else DEFAULT_COMPANY_SLOTS)
+    return COMPANY_SLOTS
+
+
+reload_company_slots()
 
 
 def _norm_usage(raw) -> dict:
@@ -483,7 +660,7 @@ def count_assigned() -> int:
 def summary() -> tuple[int, int, list[str]]:
     """(可用槽位总数, 已占用槽位数, 问题公司列表)
 
-    槽位=公司×5; 与待认证账号数直接可比(GUI预检/截断依据)。
+    槽位=公司×COMPANY_SLOTS; 与待认证账号数直接可比(GUI预检/截断依据)。
     服务端拉黑的公司(blocked.json)可用槽位计0(选不到即不可用)。
     """
     usage = load_usage()
@@ -494,7 +671,7 @@ def summary() -> tuple[int, int, list[str]]:
         if not p["complete"]:
             continue
         n = len(usage.get(p["name"]) or [])
-        used += min(n, COMPANY_SLOTS)
+        used += n  # 含改小上限后超出 cap 的已绑定, 不截断
         if p["name"] in blocked:
             continue
         ok += max(0, COMPANY_SLOTS - n)

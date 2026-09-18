@@ -26,7 +26,9 @@ LOG = logging.getLogger("license_trans.ai")
 
 PROMPT_LICENSE_VALIDATOR = "license_validator_v2"
 PROMPT_TRANSLATION = "translation_v2"
+PROMPT_SCOPE_TRANSLATION = "scope_translation_v1"
 PROMPT_TRANSLATION_VALIDATOR = "translation_validator_v2"
+PROMPT_SEMANTIC_ARBITER = "semantic_arbiter_v1"
 
 _DEFAULTS = {
     "enabled": False,

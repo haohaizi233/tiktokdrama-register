@@ -388,7 +388,11 @@ def _match_level(text: str, kind: str, parent: str | None, prefer: list[str] | N
             return name, len(name)
         core = _core_of(name)
         if core and len(core) >= 2 and text.startswith(core):
-            if kind == "city" and len(text) > len(core) and text[len(core)] == "区":
+            nxt = text[len(core)] if len(text) > len(core) else ""
+            # 开平市 must not match area-core 开平区; 朝阳区 must not match city-core 朝阳市.
+            if kind == "city" and nxt in "区县" and not name.endswith(nxt):
+                continue
+            if kind == "area" and nxt in "市" and not name.endswith(nxt):
                 continue
             return name, len(core)
     suffix = {"province": "省", "city": "市州盟", "area": "区县旗", "town": "街道镇乡苏木"}.get(kind, "")

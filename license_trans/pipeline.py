@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import threading
 from datetime import date
 from pathlib import Path
 
@@ -524,6 +525,12 @@ def _scope_broken(scope: str) -> bool:
     return depth != 0
 
 
+def _scope_join_glitch(scope: str) -> bool:
+    """住所 `住` or wrap garbage glued into 经营范围 (株洲浩航)."""
+    t = re.sub(r"\s+", "", scope or "")
+    return any(s in t for s in ("日住", "文县用品", "玩且", "体存用品", "花客", "前包销售", "以量心"))
+
+
 _ANCHOR_PAT = re.compile(
     r"营业执照|统一社会|信用代码|法定代表人|经营范围|注册资本|注册资金|"
     r"成立日期|营业期限|经营期限|登记机关|发证日期|核准日期|住所|经营场所|"
@@ -688,7 +695,9 @@ def _run_ai_validation_and_retry(
 
     if not ai_client.is_available():
         _harvest_from_ocr(fields, tracker, raw_texts, lines)
-        if not field_passes_rules("scope", getattr(fields, "scope", "") or "") or _scope_looks_like_name(fields):
+        if (not field_passes_rules("scope", getattr(fields, "scope", "") or "")
+                or _scope_looks_like_name(fields)
+                or _scope_join_glitch(getattr(fields, "scope", "") or "")):
             recovered, _extra = _recover_scope(oriented, lines, engine)
             if recovered:
                 _adopt_fill(fields, tracker, "scope", recovered, "scope_strip", "经营范围条")
@@ -737,7 +746,9 @@ def _run_ai_validation_and_retry(
             break
 
     _harvest_from_ocr(fields, tracker, raw_texts, lines)
-    if not field_passes_rules("scope", getattr(fields, "scope", "") or "") or _scope_looks_like_name(fields):
+    if (not field_passes_rules("scope", getattr(fields, "scope", "") or "")
+            or _scope_looks_like_name(fields)
+            or _scope_join_glitch(getattr(fields, "scope", "") or "")):
         recovered, _extra = _recover_scope(oriented, lines, engine)
         if recovered:
             _adopt_fill(fields, tracker, "scope", recovered, "scope_strip", "经营范围条")
@@ -873,7 +884,7 @@ def _scope_from_ocr_lines(lines: list[OcrLine] | None) -> str:
     if key is None:
         return ""
     page_w = max((ln.x1 for ln in lines), default=key.x1) or 1
-    left_cut = page_w * 0.62
+    left_cut = page_w * 0.52
     parts: list[str] = []
     inline = re.sub(r"^经营范围[:：]?", "", re.sub(r"\s+", "", key.text or ""))
     inline = re.sub(r"^营范围[:：]?", "", inline)
@@ -884,7 +895,11 @@ def _scope_from_ocr_lines(lines: list[OcrLine] | None) -> str:
         if ln is key:
             continue
         t = re.sub(r"\s+", "", ln.text or "")
-        if not t:
+        if not t or t in {"住", "所"}:
+            continue
+        if "专用章" in t and len(t) <= 8:
+            continue
+        if t.startswith("经营范") and "项目" not in t and len(t) < 10:
             continue
         if any(t == s or t.startswith(s) for s in stops) and len(t) < 12:
             continue
@@ -900,10 +915,11 @@ def _scope_from_ocr_lines(lines: list[OcrLine] | None) -> str:
 
 def _harvest_scope_text(compact: str) -> str:
     from .parse import clip_scope_text
+    from .rule_repair import scope_text_is_plausible
 
     compact = (compact or "").replace("许可具", "许可项").replace("般项日", "般项目")
     clipped = clip_scope_text(compact)
-    if clipped and ("许可项目" in clipped or "一般项目" in clipped or "许可项" in clipped) and len(clipped) >= 8:
+    if clipped and scope_text_is_plausible(clipped) and len(clipped) >= 8:
         return _sanitize_scope(clipped)
     m = re.search(
         r"(?:经营范围|许可项目|许可项|一般项目|般项目)[:：]?(.*?)(?:注册资本|成立日期|营业期限|登记机关|$)",
@@ -911,11 +927,20 @@ def _harvest_scope_text(compact: str) -> str:
     )
     if not m:
         return ""
-    body = re.split(r"住所|住\s*所", m.group(1))[0]
+    # 住所 is often OCR'd as a lone「所」glued after 经营范围 (Baoji: 经营范围所陕西…).
+    body = re.split(
+        r"住所|住\s*所"
+        r"|(?<=范围)所(?=[\u4e00-\u9fff])"
+        r"|(?<=项目)所(?=[\u4e00-\u9fff])"
+        r"|^所(?=[\u4e00-\u9fff]{2,}(?:省|市|自治区|区|县|镇))",
+        m.group(1),
+    )[0]
     if len(body) < 8:
         return ""
-    clipped = clip_scope_text("许可项目" + body) or body
-    return _sanitize_scope(clipped)
+    candidate = clip_scope_text(body) or body
+    if not scope_text_is_plausible(candidate):
+        return ""
+    return _sanitize_scope(candidate)
 
 
 def _infer_authority_from_place(address: str, name: str = "") -> str:
@@ -949,6 +974,25 @@ def _harvest_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
     blob = "".join(raw_texts or [])
     if not compact:
         return
+
+    from .parse import pick_best_usci
+    from .usci import is_company_usci
+
+    current_usci = getattr(fields, "credit_code", "") or ""
+    harvested_usci = pick_best_usci(raw_texts, lines)
+    if harvested_usci and harvested_usci != current_usci:
+        if not field_passes_rules("credit_code", current_usci) or (
+            is_company_usci(harvested_usci) and not is_company_usci(current_usci)
+        ):
+            _adopt_fill(fields, tracker, "credit_code", harvested_usci, "ocr_harvest", "统一社会信用代码")
+
+    if not field_passes_rules("type", getattr(fields, "type", "") or ""):
+        m = re.search(
+            r"((?:有限责任公司|股份有限公司)[（(][^）)]{2,24}[）)])",
+            compact,
+        ) or re.search(r"(有限责任公司|股份有限公司|一人有限责任公司)", compact)
+        if m and _grounded_in_ocr(m.group(1), blob):
+            _adopt_fill(fields, tracker, "type", m.group(1), "ocr_harvest", "类型")
 
     def _date(m: re.Match) -> str:
         return f"{int(m.group(1)):04d}年{int(m.group(2)):02d}月{int(m.group(3)):02d}日"
@@ -996,14 +1040,41 @@ def _harvest_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
             if inferred:
                 _adopt_fill(fields, tracker, "authority", inferred, "place_infer", "住所推断登记机关")
 
-    candidates = [_scope_from_ocr_lines(lines), _harvest_scope_text(compact)]
-    scope_txt = max((c for c in candidates if c), key=len, default="")
-    if scope_txt and (
-        _scope_looks_like_name(fields)
-        or not field_passes_rules("scope", getattr(fields, "scope", "") or "")
-        or len(scope_txt) > len(re.sub(r"\s+", "", getattr(fields, "scope", "") or "")) + 8
-    ):
-        _adopt_fill(fields, tracker, "scope", scope_txt, "ocr_harvest", "经营范围")
+    from_lines = _scope_from_ocr_lines(lines)
+    from_blob = _harvest_scope_text(compact)
+
+    def _scope_rank(text: str) -> tuple:
+        t = re.sub(r"\s+", "", text or "")
+        leak = bool(re.search(
+            r"办公楼|旧址|村委会|审批专用章|许可项目住|许可项目所",
+            t,
+        ))
+        return (
+            not leak,
+            "日住" not in t,
+            "预包装" in t or "散装食品" in t or "食品经营" in t,
+            "销售" in t,
+            "一般项目" in t,
+            "许可项目" in t and "许可项目住" not in t and "许可项目所" not in t,
+            "日用百货" in t,
+            len(t),
+        )
+
+    ranked = [
+        (_scope_rank(c), c) for c in (from_lines, from_blob)
+        if c and field_passes_rules("scope", c)
+    ]
+    scope_txt = max(ranked, key=lambda item: item[0])[1] if ranked else ""
+    current_scope = getattr(fields, "scope", "") or ""
+    if scope_txt:
+        current_bad = (
+            _scope_looks_like_name(fields)
+            or _scope_join_glitch(current_scope)
+            or not field_passes_rules("scope", current_scope)
+        )
+        harvest_better = _scope_rank(scope_txt) > _scope_rank(current_scope)
+        if current_bad or harvest_better:
+            _adopt_fill(fields, tracker, "scope", scope_txt, "ocr_harvest", "经营范围")
 
 
 def _fields_needing_ai_fill(fields) -> list[str]:
@@ -1031,7 +1102,8 @@ def _ai_fill_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
         "\"YYYY年MM月DD日\", \"term\": \"...至长期\", \"issue_date\": "
         "\"YYYY年MM月DD日\", \"authority\": \"...局\", \"scope\": \"经营范围正文\"}}. "
         "Copy existing OCR text; do not invent. Omit keys you cannot find. "
-        "authority must contain 局. scope is business items, not the company name."
+        "authority must contain 局. scope is business items (一般项目/许可项目/"
+        "销售/加工/服务…), never the company name, registered address, URL, or seal."
     )
     user = json.dumps({"need": needed, "parsed": {
         n: getattr(fields, n, "") for n in _AI_FILL_FIELDS
@@ -1052,9 +1124,12 @@ def _ai_fill_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
             val = _sanitize_scope(val)
         grounded = _grounded_in_ocr(val, blob)
         if not grounded and name == "scope":
-            biz = any(k in val for k in ("许可", "一般项目", "分包", "租赁", "销售", "服务"))
+            from .rule_repair import scope_text_is_plausible
             name_zh = getattr(fields, "name", "") or ""
-            grounded = biz and val != name_zh and name_zh not in val
+            grounded = (
+                scope_text_is_plausible(val, getattr(fields, "address", "") or "")
+                and val != name_zh and name_zh not in val
+            )
         if not grounded:
             LOG.info("[AI] 丢弃未在 OCR 中出现的 %s: %s", name, val[:40])
             continue
@@ -1225,6 +1300,8 @@ def _run_translation_pipeline(
                      len(result["issues"]))
         else:
             LOG.info("[AI] 翻译校验通过")
+    from .translate import sanitize_english_scope
+    english["scope"] = sanitize_english_scope(english.get("scope") or "")
     for field in ("address", "authority", "name"):
         if leftover_cjk(english.get(field) or ""):
             flags.setdefault(field, "web_verify")
@@ -1307,7 +1384,7 @@ def convert_image(
             if not field_passes_rules("issue_date", fields.issue_date or ""):
                 _fallback_issue_from_established(fields)
 
-        if not field_passes_rules("scope", fields.scope or "") or _scope_looks_like_name(fields):
+        if not field_passes_rules("scope", fields.scope or "") or _scope_looks_like_name(fields) or _scope_join_glitch(fields.scope or ""):
             recovered, _extra = _recover_scope(oriented, lines, engine)
             if recovered:
                 fields.scope = recovered
@@ -1368,6 +1445,18 @@ def convert_image(
     english = _run_translation_pipeline(canonical, config, trace)
     LOG.info("译文  %s", english.get("name") or "（无名称）")
 
+    from .semantic_arbiter import arbitrate
+    arbitration = arbitrate(canonical.to_translation_input(), english, config)
+    trace.emit(
+        "SEMANTIC_ARBITRATION",
+        passed=arbitration.passed,
+        reasons=arbitration.reasons,
+        source=arbitration.source,
+        field_failures=arbitration.field_failures,
+    )
+    if not arbitration.passed:
+        LOG.warning("出PDF前语义仲裁未通过: %s", "; ".join(arbitration.reasons[:4]))
+
     display = _display_view(oriented, lines, meta)
     LOG.info("渲染英文模板 PDF")
     trace.emit("PDF_RENDER", output=str(output_path))
@@ -1394,6 +1483,7 @@ def convert_image(
         "ocr_actual": canonical.ocr_actual,
         "fallback_used": canonical.fallback_used,
         "needs_review": list(canonical.needs_review),
+        "arbitration": arbitration.to_dict(),
         "events": trace.to_list(),
         "status": {
             "ocr_primary": canonical.ocr_primary,
@@ -1405,6 +1495,7 @@ def convert_image(
                 if isinstance(e, dict) and e.get("provider") == "web_verified"
             ),
             "need_review": len(canonical.needs_review),
+            "arbitration_passed": arbitration.passed,
         },
     }
     if work_dir:
@@ -1419,6 +1510,9 @@ def convert_image(
 
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
+_LIB_LOCK = threading.Lock()
+CN_POOL_RESERVE_SLOTS = 10
+CN_META_NAME = "cn_meta.json"
 
 
 def _pick_best_license(candidates: list[tuple[Path, list[OcrLine]]]) -> tuple[Path, list[OcrLine]]:
@@ -1430,6 +1524,113 @@ def _pick_best_license(candidates: list[tuple[Path, list[OcrLine]]]) -> tuple[Pa
     return max(candidates, key=lambda item: (len(item[1]), item[0].stat().st_size))
 
 
+def _arbitration_fail_reason(info: dict) -> str:
+    """Human-readable why this conversion should not enter 资料/."""
+    fields = info.get("fields") or {}
+    missing = _missing_critical(fields)
+    if missing:
+        return "缺失字段: " + ",".join(missing)
+    warnings = fields.get("warnings") or []
+    if "credit_code_checksum" in warnings:
+        return "信用代码校验失败"
+    review = info.get("needs_review") or []
+    if review:
+        return "AI仲裁需复核: " + ",".join(str(x) for x in review)
+    english = info.get("english") or {}
+    arb = info.get("arbitration")
+    if isinstance(arb, dict) and arb.get("passed") is False:
+        reasons = [str(x) for x in (arb.get("reasons") or []) if str(x).strip()]
+        return "语义仲裁未通过: " + "; ".join(reasons[:3]) if reasons else "语义仲裁未通过"
+    from .semantic_arbiter import rule_gate
+    ruled = rule_gate(fields, english)
+    if not ruled.passed:
+        return ruled.fail_message()
+    for field in ("name", "scope", "address", "legal_person"):
+        bits = leftover_cjk(english.get(field) or "")
+        if bits:
+            return f"英译残留中文({field})"
+    if not (english.get("name") or "").strip():
+        return "英译名称为空"
+    return ""
+
+
+def _write_cn_meta(folder: Path, info: dict, id_fields: dict | None = None) -> Path:
+    from .id_card import cn_admin_parts
+
+    fields = info.get("fields") or {}
+    english = info.get("english") or {}
+    ids = id_fields or {}
+    address_zh = fields.get("address") or ""
+    province, city = cn_admin_parts(address_zh)
+    meta = {
+        "workflow": "cn",
+        "name_zh": fields.get("name") or "",
+        "name_en": english.get("name") or "",
+        "credit_code": fields.get("credit_code") or "",
+        "legal_person": fields.get("legal_person") or "",
+        "address_zh": address_zh,
+        "address_en": english.get("address") or "",
+        "reg_state": province,
+        "reg_city": city,
+        "established": fields.get("established") or "",
+        "term": fields.get("term") or "",
+        "license_pdf": str(Path(info.get("output") or "").name),
+        "id_name": ids.get("name") or "",
+        "id_no": ids.get("id_no") or "",
+        "id_birth": ids.get("birth") or "",
+        "id_exp": ids.get("id_exp") or "",
+        "id_long_term": bool(ids.get("id_long_term")),
+        "id_authority": ids.get("authority") or "",
+    }
+    path = folder / CN_META_NAME
+    path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def _note_review(source: Path, folder: Path, file: str, reason: str, info: dict | None = None) -> None:
+    from .review_sheet import append_review_row
+
+    fields = (info or {}).get("fields") or {}
+    missing = _missing_critical(fields) if info else []
+    try:
+        append_review_row(
+            source,
+            folder=folder.name,
+            file=file,
+            reason=reason,
+            name=(fields.get("name") if isinstance(fields, dict) else "") or "",
+            credit_code=(fields.get("credit_code") if isinstance(fields, dict) else "") or "",
+            missing=",".join(missing),
+        )
+    except Exception:
+        LOG.exception("写入待人工处理表失败")
+
+
+def _commit_best_ids(
+    candidates: list[tuple[Path, list[OcrLine], str]],
+    log=None,
+) -> tuple[set[str], dict]:
+    """Score ID candidates, copy the best photo per side, merge parsed fields."""
+    from .id_card import copy_id_canonical, merge_id_fields, parse_id_fields, pick_best_ids
+
+    best = pick_best_ids(candidates)
+    sides: set[str] = set()
+    fields: dict = {}
+    for side, (img, lines, quality) in best.items():
+        dest = copy_id_canonical(img, side)
+        sides.add(side)
+        fields = merge_id_fields(fields, parse_id_fields(lines))
+        if log:
+            tag = "手持/远景" if quality.handheld else "特写"
+            dest_name = dest.name if dest is not None else "?"
+            log(
+                f"  身份证{side}: {img.name} [{tag} 字号{quality.font_px:.0f}px "
+                f"得分{quality.score:.0f}] → {dest_name}",
+                "ok",
+            )
+    return sides, fields
+
+
 def process_license_library(
     source_dir: str | Path,
     dest_dir: str | Path,
@@ -1439,38 +1640,69 @@ def process_license_library(
     log=None,
     progress=None,
     stop_event=None,
+    limit: int | None = None,
 ) -> dict:
     """Batch-process the license library:
 
     1. Scan company subfolders in source_dir (中国执照库)
-    2. For each subfolder: quick-detect which images are licenses (parallel, max_workers)
-    3. Pick the clearest license (most OCR lines, then largest file)
-    4. Full OCR + translate → output PDF in the company folder
-    5. Move the company folder to dest_dir (资料)
+    2. First-round OCR: licenses + 身份证正/反面 (copy as stem-正面/反面)
+    3. Missing ID sides → 待人工处理.xlsx, do not translate
+    4. Pick the clearest license (most OCR lines, then largest file)
+    5. Full OCR + translate → output PDF in the company folder
+    6. AI arbitration fail → 待人工处理.xlsx (stay put)
+    7. Move passing company folders to dest_dir (资料)
 
-    Returns {"processed": N, "failed": N, "moved": N, "skipped": N}.
+    Returns {"processed": N, "failed": N, "moved": N, "skipped": N, "review": N}.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     source = Path(source_dir)
     dest = Path(dest_dir)
+    empty = {"processed": 0, "failed": 0, "moved": 0, "skipped": 0, "review": 0}
 
     if not source.exists():
         if log:
             log(f"执照库不存在: {source}", "err")
-        return {"processed": 0, "failed": 0, "moved": 0, "skipped": 0}
+        return empty
+
+    with _LIB_LOCK:
+        return _process_license_library_locked(
+            source, dest,
+            max_workers=max_workers, engine=engine, log=log,
+            progress=progress, stop_event=stop_event, limit=limit,
+        )
+
+
+def _process_license_library_locked(
+    source: Path,
+    dest: Path,
+    *,
+    max_workers: int,
+    engine: LicenseOCR | OcrService | None,
+    log,
+    progress,
+    stop_event,
+    limit: int | None,
+) -> dict:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     eng = engine or OcrService()
-    company_folders = sorted([d for d in source.iterdir() if d.is_dir()])
+    skip_names = {"待人工处理.xlsx"}
+    company_folders = sorted(
+        d for d in source.iterdir()
+        if d.is_dir() and d.name not in {"资料不全"}
+    )
     total = len(company_folders)
-    processed = failed = moved = skipped = 0
+    processed = failed = moved = skipped = review = 0
 
-    # --- Pass 1: scan all folders, quick-detect, pick best license ---
-    convert_tasks: list[tuple[Path, Path, Path]] = []  # (folder, best_img, dest_pdf)
+    # --- Pass 1: scan folders, quick-detect licenses + ID cards ---
+    convert_tasks: list[tuple[Path, Path, Path, dict]] = []  # folder, img, pdf, id_fields
     for i, folder in enumerate(company_folders, start=1):
         if stop_event and stop_event.is_set():
             if log:
                 log("已停止扫描执照库", "warn")
+            break
+        if limit is not None and len(convert_tasks) >= limit:
             break
 
         if progress:
@@ -1478,13 +1710,13 @@ def process_license_library(
 
         images = sorted(
             f for f in folder.iterdir()
-            if f.is_file() and f.suffix.lower() in IMAGE_EXTS)
+            if f.is_file() and f.suffix.lower() in IMAGE_EXTS
+            and f.name not in skip_names)
         if not images:
             skipped += 1
             continue
 
-        # Quick-detect licenses in parallel
-        licenses: list[tuple[Path, list[OcrLine]]] = []
+        detect_hits: list[tuple[Path, bool, list[OcrLine]]] = []
         with ThreadPoolExecutor(max_workers=min(max_workers, len(images))) as pool:
             futures = {pool.submit(eng.quick_detect, img): img for img in images}
             for fut in as_completed(futures):
@@ -1493,16 +1725,37 @@ def process_license_library(
                 img = futures[fut]
                 try:
                     is_license, lines = fut.result()
-                    if is_license:
-                        licenses.append((img, lines))
+                    detect_hits.append((img, is_license, lines))
                 except Exception as exc:
                     if log:
                         log(f"  检测失败 {img.name}: {exc}", "err")
+
+        licenses: list[tuple[Path, list[OcrLine]]] = []
+        id_candidates: list[tuple[Path, list[OcrLine], str]] = []
+        from .id_card import already_id_copy, classify_id_side, named_id_side
+        for img, is_license, lines in detect_hits:
+            if is_license:
+                licenses.append((img, lines))
+                continue
+            if already_id_copy(img) and not img.stem.startswith(("id-", "id_")):
+                continue
+            side = classify_id_side(lines) or named_id_side(img)
+            if side:
+                id_candidates.append((img, lines, side))
+        id_sides, id_fields = _commit_best_ids(id_candidates, log)
 
         if not licenses:
             if log:
                 log(f"[{i}/{total}] {folder.name}: 未找到营业执照, 跳过", "warn")
             skipped += 1
+            continue
+        missing_id = [s for s in ("正面", "反面") if s not in id_sides]
+        if missing_id:
+            reason = "缺身份证" + "、".join(missing_id)
+            _note_review(source, folder, "", reason)
+            if log:
+                log(f"[{i}/{total}] {folder.name}: {reason}, 不翻译", "warn")
+            review += 1
             continue
 
         best_img, _best_quick_lines = _pick_best_license(licenses)
@@ -1510,24 +1763,29 @@ def process_license_library(
             log(f"[{i}/{total}] {folder.name}: 找到 {len(licenses)} 张执照, "
                 f"选用 {best_img.name} ({best_img.stat().st_size // 1024}KB)", "ok")
         dest_pdf = folder / (best_img.stem + "英文版.pdf")
-        convert_tasks.append((folder, best_img, dest_pdf))
+        convert_tasks.append((folder, best_img, dest_pdf, id_fields))
 
     # --- Pass 2: convert + move in parallel (3 workers) ---
     convert_workers = min(3, len(convert_tasks))
 
     def _convert_and_move(task):
-        folder, best_img, dest_pdf = task
+        folder, best_img, dest_pdf, id_fields = task
         try:
             info = convert_image(best_img, dest_pdf, ocr=eng, work_dir=ROOT / "license_work")
         except NotFormatA as exc:
-            return ("skip", folder, dest_pdf, str(exc))
+            _note_review(source, folder, best_img.name, f"非A格式: {exc}")
+            return ("skip", folder, dest_pdf, str(exc), None)
         except Exception as exc:
-            return ("fail", folder, dest_pdf, str(exc))
-        # Check if critical fields are missing — don't move if incomplete
-        missing = _missing_critical(info["fields"])
-        if missing:
-            return ("incomplete", folder, dest_pdf, ", ".join(missing))
-        # Move folder to dest
+            _note_review(source, folder, best_img.name, f"翻译失败: {exc}")
+            return ("fail", folder, dest_pdf, str(exc), None)
+        reason = _arbitration_fail_reason(info)
+        if reason:
+            _note_review(source, folder, best_img.name, reason, info)
+            return ("review", folder, dest_pdf, reason, info)
+        try:
+            _write_cn_meta(folder, info, id_fields)
+        except Exception:
+            LOG.exception("写入 cn_meta 失败")
         try:
             dest.mkdir(parents=True, exist_ok=True)
             target = dest / folder.name
@@ -1535,9 +1793,9 @@ def process_license_library(
                 import shutil
                 shutil.rmtree(target)
             folder.rename(target)
-            return ("ok", folder, target, "")
+            return ("ok", folder, target, "", info)
         except Exception as exc:
-            return ("moved_fail", folder, dest_pdf, str(exc))
+            return ("moved_fail", folder, dest_pdf, str(exc), info)
 
     if convert_tasks:
         convert_total = len(convert_tasks)
@@ -1561,12 +1819,12 @@ def process_license_library(
                     if log:
                         log(f"  异常: {exc}", "err")
                     continue
-                kind, folder, dest_pdf, msg = result
+                kind, folder, dest_pdf, msg, _info = result
                 if kind == "ok":
                     processed += 1
                     moved += 1
                     if log:
-                        log(f"  ✓ {folder.name} → {msg}", "ok")
+                        log(f"  ✓ {folder.name} → {dest_pdf}", "ok")
                 elif kind == "skip":
                     skipped += 1
                     if log:
@@ -1579,9 +1837,48 @@ def process_license_library(
                     processed += 1
                     if log:
                         log(f"  ⚠ {folder.name}: 翻译成功但移动失败: {msg}", "warn")
-                elif kind == "incomplete":
-                    failed += 1
+                elif kind == "review":
+                    review += 1
                     if log:
-                        log(f"  ⚠ {folder.name}: 字段缺失 [{msg}], 不移动, 留待重试", "warn")
+                        log(f"  ✗ {folder.name}: AI仲裁未通过 [{msg}], 已记入待人工处理表", "err")
 
-    return {"processed": processed, "failed": failed, "moved": moved, "skipped": skipped}
+    return {"processed": processed, "failed": failed, "moved": moved, "skipped": skipped, "review": review}
+
+
+def ensure_cn_reserve(
+    *,
+    log=None,
+    stop_event=None,
+    engine=None,
+    reserve_slots: int = CN_POOL_RESERVE_SLOTS,
+) -> dict:
+    """If 资料/ free slots are below reserve, translate more 中国执照库 folders."""
+    import materials
+
+    stats = {"processed": 0, "failed": 0, "moved": 0, "skipped": 0, "review": 0}
+    try:
+        free, _, _ = materials.summary()
+    except Exception as exc:
+        if log:
+            log(f"公司池统计失败, 跳过预翻译: {exc}", "warn")
+        return stats
+    if free >= reserve_slots:
+        if log:
+            log(f"公司池充足({free}槽 ≥ 预留{reserve_slots}), 无需预翻译", "dim")
+        return stats
+    need = max(1, (reserve_slots - free + materials.COMPANY_SLOTS - 1) // materials.COMPANY_SLOTS)
+    source = ROOT / "中国执照库"
+    dest = ROOT / "资料"
+    if log:
+        log(f"公司池仅剩{free}槽, 预翻译 {need} 家中国执照(身份证+执照+英译)…", "warn")
+    stats = process_license_library(
+        source, dest, max_workers=5, engine=engine, log=log,
+        stop_event=stop_event, limit=need,
+    )
+    if log:
+        log(
+            f"预翻译结束: 移动 {stats.get('moved', 0)} / 仲裁未过 {stats.get('review', 0)} / "
+            f"失败 {stats.get('failed', 0)} / 跳过 {stats.get('skipped', 0)}",
+            "ok" if not stats.get("failed") and not stats.get("review") else "warn",
+        )
+    return stats
