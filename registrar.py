@@ -106,6 +106,32 @@ def dismiss_welcome_modal(page, wait_s: float = 0) -> bool:
         time.sleep(0.5)
 
 
+def _send_error_toast(page) -> str:
+    """点发送后立刻检查 toast, 捕获「区域不支持」等即时拒绝.
+
+    Semi UI toast (.semi-toast-content) 只显示约2-3秒, 点发送后2秒已渲染,
+    再轮询3秒覆盖动画延迟。返回错误文本或空串。
+    """
+    _ERR = ("不支持", "区域", "地区", "失败", "错误", "频繁", "限制",
+            "稍后", "无法", "不可用", "disabled", "not available", "region")
+    for _ in range(6):
+        texts = []
+        for sel in (".semi-toast-content", ".semi-toast",
+                    "[class*='toast']", "[role='alert']"):
+            try:
+                texts = [t.strip() for t in
+                         page.locator(sel).all_inner_texts() if t.strip()]
+            except Exception:
+                continue
+            if texts:
+                break
+        for t in texts:
+            if any(k in t for k in _ERR):
+                return t[:120]
+        time.sleep(0.5)
+    return ""
+
+
 def login_with_code(page, email: str, *, log=None, code_timeout: int = 180,
                     stop_event: Event | None = None, shoot=None) -> None:
     """/login页邮箱验证码登录(未注册自动注册), 成功后保存/刷新 auth/{email}.json"""
@@ -148,6 +174,11 @@ def login_with_code(page, email: str, *, log=None, code_timeout: int = 180,
     if shoot:
         shoot(page, "after_send")
     time.sleep(2)
+    toast = _send_error_toast(page)
+    if toast:
+        if shoot:
+            shoot(page, "send_toast")
+        raise RuntimeError(f"发送验证码被拒: {toast}")
     log("  已点击发送, 等待验证码邮件…")
 
     result = mail_api.wait_for_code(

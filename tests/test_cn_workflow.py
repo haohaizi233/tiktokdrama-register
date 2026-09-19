@@ -50,6 +50,18 @@ def test_cn_folder_incomplete_without_ids(tmp_path, monkeypatch):
     assert any("id_front" in x for x in p["issues"])
 
 
+def test_review_sheet_only_for_semantic_arbitration():
+    from license_trans.pipeline import _is_ocr_transient, _is_semantic_review
+
+    assert _is_semantic_review({}, "语义仲裁未通过: 经营范围像住所/印章/网址") is True
+    assert _is_semantic_review({}, "缺失字段: credit_code,capital") is False
+    assert _is_semantic_review({}, "翻译失败: WeChat OCR timed out after 30.0s") is False
+    assert _is_semantic_review({}, "非A格式: 个体户") is False
+    assert _is_ocr_transient(RuntimeError("WeChat OCR timed out after 30.0s")) is True
+    assert _is_ocr_transient(RuntimeError("No OCR engine available")) is True
+    assert _is_ocr_transient(RuntimeError("disk full")) is False
+
+
 def test_arbitration_fail_on_missing_and_cjk():
     assert "缺失字段" in _arbitration_fail_reason({"fields": {"name": "A"}})
     ok = {

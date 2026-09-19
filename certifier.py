@@ -431,8 +431,8 @@ class _Form:
             time.sleep(0.8)
             got = self.page.locator(
                 f"{wrap} .semi-select-selection-text").first.inner_text().strip()
-            if got == name:
-                self.log(f"  国家/地区: {name}", "dim")
+            if got == name or name in got:
+                self.log(f"  国家/地区: {got}", "dim")
                 return
             if attempt == 1:
                 self.log(f"  [国家/地区] 选择未生效(实际[{got}]), 重试", "warn")
@@ -975,7 +975,7 @@ def certify_page(page, profile: dict, *, log=None, stop_event=None,
             # 换名重提: 废弃旧名(discard终态, 服务端已占用永不可复用)+
             # allocate下一个+只清填机构名框重新提交, 其他字段/已传文件不动
             name_swaps += 1
-            if not email or name_swaps > 5:
+            if not email or name_swaps > 10:
                 raise CertError(
                     f"机构名重复且无法换名(已试{name_swaps}次): {toast[:60]}")
             institutions.discard(institution, note="服务端toast: 机构名称已存在")

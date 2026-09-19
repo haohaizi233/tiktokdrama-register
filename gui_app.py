@@ -270,7 +270,7 @@ class App(tk.Tk):
         self.chk_headless = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar3, text="无头模式(后台运行不弹浏览器)",
                         variable=self.chk_headless).pack(side="right", padx=(0, 14))
-        self.chk_parallel_lic = tk.BooleanVar(value=True)
+        self.chk_parallel_lic = tk.BooleanVar(value=False)
         ttk.Checkbutton(bar3, text="并行执照翻译(扫描执照库)",
                         variable=self.chk_parallel_lic).pack(side="right", padx=(0, 14))
         # 操作行(下): 消耗数 + 按钮组
@@ -639,23 +639,32 @@ class App(tk.Tk):
         sel = self.cmb_count.get()
         targets = unused if sel == "max" else unused[: int(sel)]
         autocert = self.chk_autocert.get()
+        skip_parallel = False
         if autocert:
+            cap = None
             try:
                 ok_c, _, _ = materials.summary()
-            except Exception as e:
-                self._append_log(f"公司资料解析失败({e}), 本次注册将跳过自动认证", "warn")
-                autocert = False
-            else:
                 unused_i, _ = institutions.summary()
                 cap = min(ok_c, unused_i)
+            except Exception as e:
+                self._append_log(f"公司资料解析失败({e})", "warn")
+                cap = 0
+            if cap is not None and (cap <= 0 or cap < len(targets)):
+                decided = self._ask_when_cert_short(cap, len(targets), confirm)
+                if decided == "cancel":
+                    return
+                if decided == "translate":
+                    self._start_license_scan_instead_of_register()
+                    return
+                skip_parallel = True
                 if cap <= 0:
-                    self._append_log(
-                        "没有可用公司槽位或机构名, 本次注册将跳过自动认证", "warn")
                     autocert = False
-                elif cap < len(targets):
+                    self._append_log(
+                        "没有可用公司槽位或机构名, 本次只注册、不认证、不并行翻译", "warn")
+                else:
                     self._append_log(
                         f"可用公司槽位/机构名仅 {cap} 个, 本次只注册前 {cap} 个账号"
-                        " (避免注册后无法认证)", "warn")
+                        " (不并行翻译执照)", "warn")
                     targets = targets[:cap]
         preview = "\n".join(a["email"] for a in targets[:5])
         if len(targets) > 5:
@@ -690,9 +699,85 @@ class App(tk.Tk):
             target=self._work, args=(targets, headless, use_hub, rot_ip, autocert, autopwd),
             daemon=True)
         self.worker.start()
-        # Parallel license translation: scan 执照库 in background
-        if self.chk_parallel_lic.get():
+        if self.chk_parallel_lic.get() and not skip_parallel:
             self._start_parallel_license_scan()
+        elif skip_parallel and self.chk_parallel_lic.get():
+            self._append_log("已跳过并行执照翻译, 以免和注册抢 OCR/网络", "dim")
+
+    def _license_library_count(self) -> int:
+        source = ROOT / "中国执照库"
+        if not source.is_dir():
+            return 0
+        return sum(1 for d in source.iterdir() if d.is_dir())
+
+    def _ask_when_cert_short(self, cap: int, n_targets: int, confirm: bool) -> str:
+        """缺槽位/机构名时先问要不要翻译执照, 避免和注册绑在一起跑.
+
+        Returns translate / register / cancel.
+        """
+        if not confirm or self.auto_close:
+            if cap <= 0:
+                self._append_log(
+                    "没有可用公司槽位或机构名, 本次注册将跳过自动认证; "
+                    "不并行翻译以免拖垮注册", "warn")
+            else:
+                self._append_log(
+                    f"可用公司槽位/机构名仅 {cap} 个, 本次只注册前 {cap} 个; "
+                    "不并行翻译", "warn")
+            return "register"
+        n_lib = self._license_library_count()
+        if cap <= 0:
+            title = "没有可用公司槽位或机构名"
+            head = (
+                "没有可用公司槽位或机构名，做不了企业认证。\n"
+                "（槽位来自「资料」里已译好的执照，机构名在②区导入。）\n\n"
+                "注册和执照翻译一起跑会抢 OCR/网络，验证码也容易超时。"
+            )
+            no_label = "仍只注册（不认证、不并行翻译）"
+        else:
+            title = "公司槽位或机构名不够"
+            head = (
+                f"可用公司槽位/机构名仅 {cap} 个，不够本次 {n_targets} 个账号的自动认证。\n\n"
+                "注册和执照翻译一起跑会抢 OCR/网络，验证码也容易超时。"
+            )
+            no_label = f"只注册并认证前 {cap} 个（不并行翻译）"
+        if n_lib <= 0:
+            if not messagebox.askyesno(
+                    title,
+                    head + f"\n\n执照库目前是空的。\n是否{no_label}？",
+                    parent=self):
+                return "cancel"
+            return "register"
+        ans = messagebox.askyesnocancel(
+            title,
+            head
+            + f"\n执照库里还有 {n_lib} 家待翻译。\n\n"
+            "是否先翻译执照、把公司资料补齐？\n\n"
+            "「是」= 只翻译执照，不注册\n"
+            f"「否」= {no_label}\n"
+            "「取消」= 返回",
+            parent=self,
+        )
+        if ans is True:
+            return "translate"
+        if ans is False:
+            return "register"
+        return "cancel"
+
+    def _start_license_scan_instead_of_register(self):
+        n_lib = self._license_library_count()
+        self._append_log(
+            f"已改为先翻译执照库（{n_lib} 家），本次不注册。", "warn")
+        try:
+            self.nb.select(self.page_lic)
+        except tk.TclError:
+            pass
+        page = getattr(self, "page_lic", None)
+        if page is not None and not getattr(page, "_busy", False) and not getattr(
+                page, "_detecting", False):
+            page.scan_library()
+            return
+        self._start_parallel_license_scan()
 
     def _start_parallel_license_scan(self):
         """Start background license library scan while registration runs."""
