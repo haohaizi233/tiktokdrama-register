@@ -25,7 +25,7 @@ import pool
 from license_gui import LicensePage
 from registrar import Registrar
 
-ROOT = Path(__file__).resolve().parent
+from paths import APP_ROOT as ROOT
 FONT = ("Microsoft YaHei UI", 10)
 LOG_TAGS = {
     "info": "#222222",
@@ -781,6 +781,8 @@ class App(tk.Tk):
 
     def _start_parallel_license_scan(self):
         """Start background license library scan while registration runs."""
+        from license_trans.pipeline import reset_reserve_exhausted
+        reset_reserve_exhausted()  # 并行扫描=可能加了新料, 重置耗尽标记
         source = ROOT / "中国执照库"
         if not source.exists():
             self._append_log("并行执照翻译: 执照库不存在, 跳过", "dim")
@@ -822,12 +824,16 @@ class App(tk.Tk):
             result = process_license_library(
                 source, dest, max_workers=5, engine=engine,
                 log=log, stop_event=stop_event)
+            _r = result
+            _total = _r["processed"] + _r["failed"] + _r.get("review", 0) + _r["skipped"]
+            _fail_total = _r["failed"] + _r.get("review", 0)
             log(
-                f"===== 执照翻译完成: 翻译 {result['processed']} / "
-                f"失败 {result['failed']} / 仲裁未过 {result.get('review', 0)} / "
-                f"移动 {result['moved']} / "
-                f"跳过 {result['skipped']} =====",
-                "ok" if result["failed"] == 0 and not result.get("review") else "warn")
+                f"===== 执照翻译完成: 共 {_total} / "
+                f"成功 {_r['processed']} / "
+                f"失败 {_fail_total}"
+                + (f" (含仲裁未过 {_r.get('review', 0)})" if _r.get("review") else "")
+                + f" / 跳过 {_r['skipped']} =====",
+                "ok" if _fail_total == 0 else "warn")
         except Exception as exc:
             log(f"执照翻译异常: {exc}", "err")
 

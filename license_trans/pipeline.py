@@ -30,13 +30,14 @@ from .rule_repair import apply_deterministic_repairs, field_passes_rules
 from .translation_resolver import TranslationResolver, leftover_cjk
 from .trace import PipelineTrace, new_trace_id
 
-ROOT = Path(__file__).resolve().parent.parent
+from paths import BUNDLE_ROOT as ROOT
 ASSETS = ROOT / "assets"
 LOG = logging.getLogger("license_trans")
 
 
 def load_config(path: str | Path | None = None) -> dict:
-    cfg = Path(path) if path else ROOT / "config.json"
+    from paths import APP_ROOT
+    cfg = Path(path) if path else APP_ROOT / "config.json"
     return json.loads(cfg.read_text(encoding="utf-8"))
 
 
@@ -1599,6 +1600,16 @@ _LIB_LOCK = threading.Lock()
 CN_POOL_RESERVE_SLOTS = 10
 CN_META_NAME = "cn_meta.json"
 
+# 预翻译耗尽标记: 上次 ensure_cn_reserve 没补到任何公司(moved=0)时置 True,
+# 后续不再对同一批失败文件夹反复重试。手动往 中国执照库 加新料后需 reset。
+_reserve_exhausted = False
+
+
+def reset_reserve_exhausted() -> None:
+    """重置预翻译耗尽标记(新加了执照料 / 开始新一轮认证任务时调)."""
+    global _reserve_exhausted
+    _reserve_exhausted = False
+
 
 def _pick_best_license(candidates: list[tuple[Path, list[OcrLine]]]) -> tuple[Path, list[OcrLine]]:
     """Pick the clearest license image from detected candidates.
@@ -1994,7 +2005,12 @@ def ensure_cn_reserve(
     engine=None,
     reserve_slots: int = CN_POOL_RESERVE_SLOTS,
 ) -> dict:
-    """If 资料/ free slots are below reserve, translate more 中国执照库 folders."""
+    """If 资料/ free slots are below reserve, translate more 中国执照库 folders.
+
+    耗尽保护: 如果上次预翻译 moved=0(全部失败/仲裁未过), 标记 _reserve_exhausted,
+    后续不再对同一批失败文件夹反复重试。手动加新料后调 reset_reserve_exhausted()。
+    """
+    global _reserve_exhausted
     import materials
 
     stats = {"processed": 0, "failed": 0, "moved": 0, "skipped": 0, "review": 0}
@@ -2008,9 +2024,20 @@ def ensure_cn_reserve(
         if log:
             log(f"公司池充足({free}槽 ≥ 预留{reserve_slots}), 无需预翻译", "dim")
         return stats
-    need = max(1, (reserve_slots - free + materials.COMPANY_SLOTS - 1) // materials.COMPANY_SLOTS)
+    if _reserve_exhausted:
+        if log:
+            log(f"执照库已耗尽(上次预翻译未补到公司), 跳过, 当前可用 {free} 槽", "dim")
+        return stats
     source = ROOT / "中国执照库"
     dest = ROOT / "资料"
+    # 执照库为空则直接标记耗尽
+    if not source.exists() or not any(
+            d.is_dir() and d.name not in {"资料不全"} for d in source.iterdir()):
+        _reserve_exhausted = True
+        if log:
+            log(f"执照库已空, 无可补翻译, 当前可用 {free} 槽", "warn")
+        return stats
+    need = max(1, (reserve_slots - free + materials.COMPANY_SLOTS - 1) // materials.COMPANY_SLOTS)
     if log:
         log(f"公司池仅剩{free}槽, 预翻译 {need} 家中国执照(身份证+执照+英译)…", "warn")
     stats = process_license_library(
@@ -2023,4 +2050,13 @@ def ensure_cn_reserve(
             f"失败 {stats.get('failed', 0)} / 跳过 {stats.get('skipped', 0)}",
             "ok" if not stats.get("failed") and not stats.get("review") else "warn",
         )
+    # 没补到任何公司 → 标记耗尽, 后续不再重试同一批失败文件夹
+    if stats.get("moved", 0) == 0:
+        _reserve_exhausted = True
+        if log:
+            log(
+                f"预翻译未能补充任何公司(全部失败/仲裁未过/缺身份证), "
+                f"后续不再重试, 当前可用 {free} 槽继续认证",
+                "warn",
+            )
     return stats

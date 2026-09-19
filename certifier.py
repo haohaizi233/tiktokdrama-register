@@ -1318,6 +1318,8 @@ class Certifier:
 
     def run(self) -> tuple[int, int, int]:
         """串行认证所有账号, 返回 (成功, 失败, 跳过)"""
+        from license_trans.pipeline import reset_reserve_exhausted
+        reset_reserve_exhausted()  # 新一轮认证: 重置预翻译耗尽标记
         total = len(self.accounts)
         ok = fail = skip = 0
         self.log(f"开始企业认证 {total} 个账号")

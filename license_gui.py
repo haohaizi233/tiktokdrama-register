@@ -19,7 +19,7 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 import tkinter as tk
 
-ROOT = Path(__file__).resolve().parent
+from paths import APP_ROOT as ROOT
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff"}
 STATUS_WAIT, STATUS_RUN, STATUS_DONE, STATUS_SKIP, STATUS_ERR, STATUS_REVIEW = (
     "等待", "转换中", "完成", "非A格式", "失败", "需复核",
@@ -79,6 +79,16 @@ _GPU_PROBE_SCRIPT = (
 _GPU_PROBE_CACHE: dict | None = None
 
 
+def _probe_onnx_inline() -> dict:
+    """进程内探测 ONNX providers(打包模式用, 替代 subprocess)。"""
+    try:
+        import onnxruntime as ort
+        providers = list(ort.get_available_providers())
+        return {"ok": True, "providers": providers, "error": ""}
+    except Exception as exc:
+        return {"ok": False, "providers": ["CPUExecutionProvider"], "error": str(exc)}
+
+
 def probe_onnx_providers(
     timeout: float = _GPU_PROBE_TIMEOUT_S,
     *,
@@ -92,6 +102,12 @@ def probe_onnx_providers(
     global _GPU_PROBE_CACHE
     if use_cache and _GPU_PROBE_CACHE is not None:
         return _GPU_PROBE_CACHE
+    if getattr(sys, "frozen", False):
+        # 打包后 sys.executable 是 exe 本身, 不能用 exe -c 起子进程(会再开GUI);
+        # 改为进程内探测, CUDA DLL 加载由 try/except 兜底
+        result = _probe_onnx_inline()
+        _GPU_PROBE_CACHE = result
+        return result
     flags = 0
     if sys.platform == "win32":
         flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -326,6 +342,16 @@ def ensure_license_deps(log) -> bool:
     if sys.platform == "win32" and not _wechat_wrapper_importable():
         missing.append(("wechat_ocr", WECHAT_OCR_PIP))
     if not missing:
+        return True
+    if getattr(sys, "frozen", False):
+        # 打包后依赖已捆绑; 可选包(translators)缺了不影响核心功能(改用词库/AI)
+        optional_missing = [p for m, p in missing if m in _OPTIONAL_IMPORT_PKGS]
+        required_missing = [(m, p) for m, p in missing if m not in _OPTIONAL_IMPORT_PKGS]
+        if optional_missing:
+            log(f"打包环境缺少可选依赖(改用词库/AI): {' '.join(optional_missing)}", "warn")
+        if required_missing:
+            log(f"打包环境缺少依赖: {' '.join(p for _, p in required_missing)}", "err")
+            return False
         return True
     names = " ".join(p for _, p in missing)
     log(f"首次使用执照翻译, 正在安装依赖: {names}", "warn")
@@ -838,6 +864,8 @@ class LicensePage(ttk.Frame):
 
     def scan_library(self):
         """Scan 中国执照库/ — detect licenses, translate, move to 资料/."""
+        from license_trans.pipeline import reset_reserve_exhausted
+        reset_reserve_exhausted()  # 手动扫描=可能加了新料, 重置耗尽标记
         if self._busy or self._detecting:
             return
         source = ROOT / "中国执照库"
@@ -867,11 +895,11 @@ class LicensePage(ttk.Frame):
 
         try:
             if not ensure_license_deps(log):
-                self.q.put(("scan_done", 0, 0, 0, 0))
+                self.q.put(("scan_done", 0, 0, 0, 0, 0))
                 return
         except Exception as exc:
             log(f"依赖检查失败: {exc}", "err")
-            self.q.put(("scan_done", 0, 0, 0, 0))
+            self.q.put(("scan_done", 0, 0, 0, 0, 0))
             return
         from license_trans.ocr_service import OcrService
         from license_trans.pipeline import process_license_library
@@ -884,7 +912,7 @@ class LicensePage(ttk.Frame):
                 engine = OcrService(load_config())
             except Exception as e:
                 log(f"OCR 引擎加载失败: {e}", "err")
-                self.q.put(("scan_done", 0, 0, 0, 0))
+                self.q.put(("scan_done", 0, 0, 0, 0, 0))
                 return
             prov = getattr(engine, "gpu_provider", "CPU")
             eng = getattr(engine, "engine_name", "RapidOCR")
@@ -896,11 +924,12 @@ class LicensePage(ttk.Frame):
                     log=log, progress=progress, stop_event=self.stop_event)
             except Exception as exc:
                 log(f"扫描执照库异常: {exc}", "err")
-                self.q.put(("scan_done", 0, 0, 0, 0))
+                self.q.put(("scan_done", 0, 0, 0, 0, 0))
                 return
             self.q.put(("scan_done",
                          result["processed"], result["failed"],
-                         result["moved"], result["skipped"]))
+                         result["moved"], result["skipped"],
+                         result.get("review", 0)))
             if result.get("review"):
                 log(f"AI仲裁未通过 {result['review']} 家, 已写入 中国执照库/待人工处理.xlsx", "warn")
         finally:
@@ -1196,20 +1225,26 @@ class LicensePage(ttk.Frame):
                     self.progress.config(maximum=tot, value=i)
                     self.lbl_progress.config(text=f"扫描执照库 {i}/{tot}  {name}")
                 elif kind == "scan_done":
-                    _, processed_n, failed_n, moved_n, skipped_n = msg
+                    _, processed_n, failed_n, moved_n, skipped_n, review_n = msg
                     self._detecting = False
                     self.progress.config(value=0)
                     self.lbl_progress.config(text="空闲")
+                    _total = processed_n + failed_n + review_n + skipped_n
+                    _fail_total = failed_n + review_n
                     self._append_log(
-                        f"===== 执照库扫描完成: 翻译 {processed_n} / 失败 {failed_n} "
-                        f"/ 移动 {moved_n} / 跳过 {skipped_n} =====",
-                        "ok" if failed_n == 0 else "warn")
+                        f"===== 执照库扫描完成: 共 {_total} / 成功 {processed_n} "
+                        f"/ 失败 {_fail_total}"
+                        + (f" (含仲裁未过 {review_n})" if review_n else "")
+                        + f" / 跳过 {skipped_n} =====",
+                        "ok" if _fail_total == 0 else "warn")
                     self.stop_event.clear()
                     row_dirty = True
                     messagebox.showinfo(
                         "执照库扫描完成",
-                        f"翻译成功: {processed_n} 个\n失败: {failed_n} 个\n"
-                        f"已移动到资料: {moved_n} 个\n跳过(无执照): {skipped_n} 个",
+                        f"共扫描: {_total} 个\n成功: {processed_n} 个\n"
+                        f"失败: {_fail_total} 个"
+                        + (f" (含仲裁未过 {review_n})" if review_n else "")
+                        + f"\n已移动到资料: {moved_n} 个\n跳过(无执照): {skipped_n} 个",
                         parent=self)
                 elif kind == "gpu_result":
                     _, token, text, color, detail, silent = msg
