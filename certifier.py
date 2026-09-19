@@ -1286,7 +1286,8 @@ class Certifier:
     def __init__(self, accounts: list[dict], headless: bool = False,
                  log=None, progress=None, code_timeout: int = 180,
                  stop_event: Event | None = None,
-                 use_hubstudio: bool = False, rotate_ip: bool = False):
+                 use_hubstudio: bool = False, rotate_ip: bool = False,
+                 on_account=None):
         self.accounts = accounts
         self.headless = headless
         self.log = log or _default_log
@@ -1295,6 +1296,7 @@ class Certifier:
         self.stop_event = stop_event or Event()
         self.use_hub = use_hubstudio
         self.rotate_ip = rotate_ip and use_hubstudio
+        self.on_account = on_account
 
     def _stopped(self) -> bool:
         return self.stop_event.is_set()
@@ -1372,10 +1374,15 @@ class Certifier:
                         if context and not self.use_hub:
                             # Hub模式窗口由WindowChain交接(账号末不关: 零窗口会杀死浏览器)
                             context.close()
+                        if self.on_account:
+                            try:
+                                self.on_account(email)
+                            except Exception:
+                                pass
             finally:
                 if browser:
                     browser.close()
-                if self.use_hub:  # close只断CDP连接, 环境进程需API关闭
+                if self.use_hub:
                     hubstudio.close_env(log=self.log)
         self.progress(total, total)
         return ok, fail, skip

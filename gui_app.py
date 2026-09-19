@@ -848,6 +848,9 @@ class App(tk.Tk):
                 shoot=shoot, do_cert=autocert, do_pwd=autopwd)
             self.q.put(("pool",))
 
+        def on_account(email):
+            self.q.put(("pool",))
+
         if use_hub:
             err = _hub_precheck(log)
             if err:
@@ -857,7 +860,8 @@ class App(tk.Tk):
             reg = Registrar(targets, headless=headless,
                             log=log, progress=prog, stop_event=self.stop_event,
                             after_register=after_register,
-                            use_hubstudio=use_hub, rotate_ip=rot_ip)
+                            use_hubstudio=use_hub, rotate_ip=rot_ip,
+                            on_account=on_account)
             ok, fail = reg.run()
             self.q.put(("done", ok, fail, self.stop_event.is_set()))
         except Exception as e:
@@ -942,6 +946,9 @@ class App(tk.Tk):
         def prog(done, tot):
             self.q.put(("progress", done, tot))
 
+        def on_account(email):
+            self.q.put(("pool",))
+
         if use_hub:
             err = _hub_precheck(log)
             if err:
@@ -951,7 +958,8 @@ class App(tk.Tk):
             cert = certifier.Certifier(targets, headless=headless,
                                        log=log, progress=prog,
                                        stop_event=self.stop_event,
-                                       use_hubstudio=use_hub, rotate_ip=rot_ip)
+                                       use_hubstudio=use_hub, rotate_ip=rot_ip,
+                                       on_account=on_account)
             ok, fail, skip = cert.run()
             self.q.put(("cert_done", ok, fail, skip, self.stop_event.is_set()))
         except Exception as e:
@@ -1007,6 +1015,9 @@ class App(tk.Tk):
         def prog(done, tot):
             self.q.put(("progress", done, tot))
 
+        def on_account(email):
+            self.q.put(("pool",))
+
         if use_hub:
             err = _hub_precheck(log)
             if err:
@@ -1016,7 +1027,7 @@ class App(tk.Tk):
             setter = password_setter.PasswordSetter(
                 targets, headless=headless, log=log, progress=prog,
                 stop_event=self.stop_event, use_hubstudio=use_hub,
-                rotate_ip=rot_ip)
+                rotate_ip=rot_ip, on_account=on_account)
             ok, fail, skip = setter.run()
             self.q.put(("pwd_done", ok, fail, skip, self.stop_event.is_set()))
         except Exception as e:

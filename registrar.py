@@ -243,13 +243,12 @@ class Registrar:
     def __init__(self, accounts: list[dict], headless: bool = False,
                  log=None, progress=None, code_timeout: int = 180,
                  stop_event: Event | None = None, after_register=None,
-                 use_hubstudio: bool = False, rotate_ip: bool = False):
+                 use_hubstudio: bool = False, rotate_ip: bool = False,
+                 on_account=None):
         """
         after_register(page, email, shoot): 注册成功后立即回调(同一已登录page),
         用于自动企业认证等; shoot(page, name)用于失败留档截图; 异常只记日志, 不影响注册结果。
-        use_hubstudio: 接管HubStudio指纹环境(指纹/代理由环境承载)而非裸起Chromium。
-        rotate_ip: HubStudio模式下每个账号开始前强制重开环境换新出口IP
-        (每账号消耗1次环境打开额度; 同一账号的注册→认证→密码仍在同一IP内完成)。
+        on_account(email): 每个账号处理完后回调(刷新号池用)。
         """
         self.accounts = accounts
         self.headless = headless
@@ -258,6 +257,7 @@ class Registrar:
         self.code_timeout = code_timeout
         self.stop_event = stop_event or Event()
         self.after_register = after_register
+        self.on_account = on_account
         self.use_hub = use_hubstudio
         self.rotate_ip = rotate_ip and use_hubstudio
 
@@ -348,8 +348,12 @@ class Registrar:
                                 self._shoot(page, "error")
                     finally:
                         if context and not self.use_hub:
-                            # Hub模式窗口由WindowChain交接(账号末不关: 零窗口会杀死浏览器)
                             context.close()
+                        if self.on_account:
+                            try:
+                                self.on_account(email)
+                            except Exception:
+                                pass
             finally:
                 if browser:
                     browser.close()
