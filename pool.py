@@ -10,7 +10,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+from paths import APP_ROOT as ROOT
 POOL_DIR = ROOT / "pool_data"
 AUTH_DIR = ROOT / "auth"
 LOG_DIR = ROOT / "logs"

@@ -35,7 +35,8 @@ API_BASE = "http://127.0.0.1:6873"
 # 上次出口103.210.9.143 Globe Telecom住宅宽带, 2026-09-07批量创建core150
 # 备选PH: 1819132568/1818970706/1818905913; 注意US出口到站点(CN CDN)不通
 DEFAULT_CONTAINER = "1819191426"
-STATE_FILE = Path(__file__).parent / "hubstudio_state.json"
+from paths import APP_ROOT
+STATE_FILE = APP_ROOT / "hubstudio_state.json"
 
 # start可安全重试的瞬时错误(环境未成功打开); -10013环境正在运行需先stop
 _TRANSIENT = {5, 21, 24, -10015}

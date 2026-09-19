@@ -12,7 +12,7 @@ import cn2an
 
 from .divisions import consume_admin, snap_text, zh_to_en
 
-ROOT = Path(__file__).resolve().parent.parent
+from paths import BUNDLE_ROOT as ROOT
 GLOSSARY = ROOT / "glossary"
 
 LOG = logging.getLogger("license_trans")

@@ -18,7 +18,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+from paths import APP_ROOT as ROOT
 INST_FILE = ROOT / "institutions.json"
 
 _IDX_PREFIX = re.compile(r"^\d{1,4}\s*[.．、)\t]\s*")

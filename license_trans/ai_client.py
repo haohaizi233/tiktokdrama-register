@@ -57,7 +57,8 @@ def is_ai_enabled(config: dict | None) -> bool:
 
 
 def _cache_path() -> Path:
-    return Path(__file__).resolve().parent.parent / "glossary" / "ai_response_cache.json"
+    from paths import BUNDLE_ROOT
+    return BUNDLE_ROOT / "glossary" / "ai_response_cache.json"
 
 
 def _load_ai_cache() -> None:

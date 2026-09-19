@@ -10,7 +10,7 @@ from PIL import Image
 
 LOG = logging.getLogger("license_trans.render")
 
-ROOT = Path(__file__).resolve().parent.parent
+from paths import BUNDLE_ROOT as ROOT
 ASSETS = ROOT / "assets"
 
 PAGE_W = 841.89

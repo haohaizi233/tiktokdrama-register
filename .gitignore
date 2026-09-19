@@ -36,3 +36,8 @@ venv/
 # ===== IDE =====
 .idea/
 .vscode/
+
+# ===== 打包产物 =====
+build/
+dist/
+*.spec.bak

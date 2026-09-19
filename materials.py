@@ -24,7 +24,7 @@ import shutil
 from datetime import date, datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+from paths import APP_ROOT as ROOT
 MATERIALS_DIR = ROOT / "资料"
 OVERRIDES_FILE = MATERIALS_DIR / "overrides.json"
 
