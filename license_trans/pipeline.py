@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import threading
+import time
 from datetime import date
 from pathlib import Path
 
@@ -452,13 +453,15 @@ def _recover_scope(image, lines: list[OcrLine], engine) -> tuple[str, list[OcrLi
         clipped = clip_scope_text(joined) or joined
         LOG.info("[OCR] 经营范围条 %d 行: %s", len(found), (clipped or "")[:80])
         score = (
-            ("许可项目" in clipped) + ("一般项目" in clipped) + ("分包" in clipped)
-            + ("租赁" in clipped) + ("项目" in clipped),
+            ("一般项目" in clipped),
+            ("许可项目" in clipped),
+            ("销售" in clipped) + ("分包" in clipped) + ("租赁" in clipped),
             len(clipped),
         )
         prev = (
-            ("许可项目" in best_text) + ("一般项目" in best_text) + ("分包" in best_text)
-            + ("租赁" in best_text) + ("项目" in best_text),
+            ("一般项目" in best_text),
+            ("许可项目" in best_text),
+            ("销售" in best_text) + ("分包" in best_text) + ("租赁" in best_text),
             len(best_text),
         )
         if clipped and score > prev:
@@ -528,7 +531,64 @@ def _scope_broken(scope: str) -> bool:
 def _scope_join_glitch(scope: str) -> bool:
     """住所 `住` or wrap garbage glued into 经营范围 (株洲浩航)."""
     t = re.sub(r"\s+", "", scope or "")
-    return any(s in t for s in ("日住", "文县用品", "玩且", "体存用品", "花客", "前包销售", "以量心"))
+    return any(s in t for s in (
+        "日住", "文县用品", "玩且", "体存用品", "花客", "前包销售", "以量心",
+        "烟草制品零建", "制品零建设", "软品零售", "销锦售", "厨兵卫具",
+        "煲泰", "医医疗",
+    ))
+
+
+def _scope_truncated(scope: str, blob: str = "") -> bool:
+    """许可项目-only fragment while OCR still has the 一般项目 body."""
+    t = re.sub(r"\s+", "", scope or "")
+    b = re.sub(r"\s+", "", blob or "")
+    if re.search(r"烟草制品零建|制品零建设", t):
+        return True
+    if "许可项目" in t and "一般项目" not in t:
+        hay = b if len(b) > len(t) else t
+        if re.search(r"计算机软硬件|日用百货|文具用品|办公用品|互联网销售", hay):
+            return True
+        if b and "销售" in b and "批发" in b and len(b) > len(t) + 60:
+            return True
+    if "一般项目" in t and "许可项目" not in t:
+        if re.search(r"许可项目|烟草制品|酒类经营|建设工程施工", b):
+            return True
+        if len(t) >= 80 and re.search(r"销售|批发|零售", t):
+            return True
+    return False
+
+
+def _combine_scope(current: str, recovered: str) -> str:
+    """Keep a long 一般项目 body and attach a recovered 许可项目 tail."""
+    cur = _sanitize_scope(current or "")
+    rec = _sanitize_scope(recovered or "")
+    if not rec:
+        return cur
+    if not cur:
+        return rec
+    cur_g, cur_l = "一般项目" in cur, "许可项目" in cur
+    rec_g, rec_l = "一般项目" in rec, "许可项目" in rec
+    if rec_g and rec_l and (not (cur_g and cur_l) or len(rec) >= len(cur)):
+        return rec
+    if cur_g and not cur_l and rec_l:
+        merged = _sanitize_scope(cur.rstrip("。.;；、 ") + rec[rec.find("许可项目"):])
+        if field_passes_rules("scope", merged) and len(merged) > len(cur):
+            return merged
+    if rec_g and not rec_l and cur_l:
+        merged = _sanitize_scope(rec.rstrip("。.;；、 ") + cur[cur.find("许可项目"):])
+        if field_passes_rules("scope", merged) and len(merged) > len(cur):
+            return merged
+    if len(rec) > len(cur) + 40 and field_passes_rules("scope", rec):
+        return rec
+    return cur
+
+
+def _scope_should_recover(scope: str, blob: str = "", fields=None) -> bool:
+    if _scope_join_glitch(scope) or _scope_truncated(scope, blob):
+        return True
+    if fields is not None and _scope_looks_like_name(fields):
+        return True
+    return not field_passes_rules("scope", scope or "")
 
 
 _ANCHOR_PAT = re.compile(
@@ -695,12 +755,11 @@ def _run_ai_validation_and_retry(
 
     if not ai_client.is_available():
         _harvest_from_ocr(fields, tracker, raw_texts, lines)
-        if (not field_passes_rules("scope", getattr(fields, "scope", "") or "")
-                or _scope_looks_like_name(fields)
-                or _scope_join_glitch(getattr(fields, "scope", "") or "")):
+        if _scope_should_recover(getattr(fields, "scope", "") or "", "".join(raw_texts), fields):
             recovered, _extra = _recover_scope(oriented, lines, engine)
             if recovered:
-                _adopt_fill(fields, tracker, "scope", recovered, "scope_strip", "经营范围条")
+                merged = _combine_scope(getattr(fields, "scope", "") or "", recovered)
+                _adopt_fill(fields, tracker, "scope", merged, "scope_strip", "经营范围条")
         _fallback_issue_from_established(fields, tracker)
         for fs in tracker.all_fields().values():
             if fs.status in (FieldStatus.RETRY_OCR, FieldStatus.SUSPECTED_OCR_ERROR,
@@ -746,12 +805,11 @@ def _run_ai_validation_and_retry(
             break
 
     _harvest_from_ocr(fields, tracker, raw_texts, lines)
-    if (not field_passes_rules("scope", getattr(fields, "scope", "") or "")
-            or _scope_looks_like_name(fields)
-            or _scope_join_glitch(getattr(fields, "scope", "") or "")):
+    if _scope_should_recover(getattr(fields, "scope", "") or "", "".join(raw_texts), fields):
         recovered, _extra = _recover_scope(oriented, lines, engine)
         if recovered:
-            _adopt_fill(fields, tracker, "scope", recovered, "scope_strip", "经营范围条")
+            merged = _combine_scope(getattr(fields, "scope", "") or "", recovered)
+            _adopt_fill(fields, tracker, "scope", merged, "scope_strip", "经营范围条")
     _ai_fill_from_ocr(fields, tracker, raw_texts, ai_client)
     _fallback_issue_from_established(fields, tracker)
     for fs in tracker.all_fields().values():
@@ -782,6 +840,10 @@ def _worth_field_retry(name: str, fields) -> bool:
     val = getattr(fields, name, "") or ""
     if name == "scope" and _scope_looks_like_name(fields):
         return False
+    if name == "scope" and (
+        _scope_join_glitch(val) or _scope_truncated(val)
+    ):
+        return True
     return not field_passes_rules(name, val)
 
 
@@ -891,11 +953,19 @@ def _scope_from_ocr_lines(lines: list[OcrLine] | None) -> str:
     if inline and inline not in ("经营范围", "营范围"):
         parts.append(inline)
     stops = ("注册资本", "成立日期", "营业期限", "登记机关", "法定代表人", "名称", "类型")
-    for ln in lines:
-        if ln is key:
-            continue
+    ordered = sorted(
+        (ln for ln in lines if ln is not key),
+        key=lambda ln: (round(ln.y0 / 8.0), ln.x0),
+    )
+    for ln in ordered:
         t = re.sub(r"\s+", "", ln.text or "")
         if not t or t in {"住", "所"}:
+            continue
+        if re.fullmatch(r"(?:SC)?(?:JDGL|CJDGL|SCJDGL|SCJDGI)", t, re.I):
+            continue
+        if re.match(r"^(?:路|街|巷)\d+号", t) and "销售" not in t:
+            continue
+        if any(s in t for s in ("以量心", "优春用总", "煲泰许可")):
             continue
         if "专用章" in t and len(t) <= 8:
             continue
@@ -919,7 +989,12 @@ def _harvest_scope_text(compact: str) -> str:
 
     compact = (compact or "").replace("许可具", "许可项").replace("般项日", "般项目")
     clipped = clip_scope_text(compact)
-    if clipped and scope_text_is_plausible(clipped) and len(clipped) >= 8:
+    if (
+        clipped
+        and scope_text_is_plausible(clipped)
+        and len(clipped) >= 8
+        and not _scope_truncated(clipped, compact)
+    ):
         return _sanitize_scope(clipped)
     m = re.search(
         r"(?:经营范围|许可项目|许可项|一般项目|般项目)[:：]?(.*?)(?:注册资本|成立日期|营业期限|登记机关|$)",
@@ -1049,12 +1124,14 @@ def _harvest_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
             r"办公楼|旧址|村委会|审批专用章|许可项目住|许可项目所",
             t,
         ))
+        truncated = _scope_truncated(t)
         return (
             not leak,
+            not truncated,
             "日住" not in t,
-            "预包装" in t or "散装食品" in t or "食品经营" in t,
-            "销售" in t,
             "一般项目" in t,
+            "销售" in t,
+            "预包装" in t or "散装食品" in t or "食品经营" in t,
             "许可项目" in t and "许可项目住" not in t and "许可项目所" not in t,
             "日用百货" in t,
             len(t),
@@ -1062,7 +1139,7 @@ def _harvest_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
 
     ranked = [
         (_scope_rank(c), c) for c in (from_lines, from_blob)
-        if c and field_passes_rules("scope", c)
+        if c and field_passes_rules("scope", c) and not _scope_truncated(c, compact)
     ]
     scope_txt = max(ranked, key=lambda item: item[0])[1] if ranked else ""
     current_scope = getattr(fields, "scope", "") or ""
@@ -1070,9 +1147,13 @@ def _harvest_from_ocr(fields, tracker: FieldStateTracker, raw_texts: list[str],
         current_bad = (
             _scope_looks_like_name(fields)
             or _scope_join_glitch(current_scope)
+            or _scope_truncated(current_scope, compact)
             or not field_passes_rules("scope", current_scope)
         )
-        harvest_better = _scope_rank(scope_txt) > _scope_rank(current_scope)
+        harvest_better = (
+            _scope_rank(scope_txt) > _scope_rank(current_scope)
+            and not _scope_truncated(scope_txt, compact)
+        )
         if current_bad or harvest_better:
             _adopt_fill(fields, tracker, "scope", scope_txt, "ocr_harvest", "经营范围")
 
@@ -1081,7 +1162,11 @@ def _fields_needing_ai_fill(fields) -> list[str]:
     needed = []
     for name in _AI_FILL_FIELDS:
         val = getattr(fields, name, "") or ""
-        if name == "scope" and _scope_looks_like_name(fields):
+        if name == "scope" and (
+            _scope_looks_like_name(fields)
+            or _scope_join_glitch(val)
+            or _scope_truncated(val)
+        ):
             needed.append(name)
         elif not field_passes_rules(name, val):
             needed.append(name)
@@ -1384,10 +1469,10 @@ def convert_image(
             if not field_passes_rules("issue_date", fields.issue_date or ""):
                 _fallback_issue_from_established(fields)
 
-        if not field_passes_rules("scope", fields.scope or "") or _scope_looks_like_name(fields) or _scope_join_glitch(fields.scope or ""):
+        if _scope_should_recover(fields.scope or "", blob, fields):
             recovered, _extra = _recover_scope(oriented, lines, engine)
             if recovered:
-                fields.scope = recovered
+                fields.scope = _combine_scope(fields.scope or "", recovered)
                 if "scope" in fields.warnings:
                     fields.warnings.remove("scope")
 
@@ -1587,7 +1672,42 @@ def _write_cn_meta(folder: Path, info: dict, id_fields: dict | None = None) -> P
     return path
 
 
+def _is_ocr_transient(exc: BaseException) -> bool:
+    msg = str(exc).lower()
+    return any(
+        token in msg
+        for token in (
+            "timed out",
+            "timeout",
+            "no ocr engine",
+            "wechatocr not initialized",
+            "ocr engine available",
+        )
+    )
+
+
+def _is_semantic_review(info: dict | None, reason: str) -> bool:
+    """True only for pre-PDF semantic arbitration — the 待人工处理 table."""
+    return str(reason or "").startswith("语义仲裁")
+
+
 def _note_review(source: Path, folder: Path, file: str, reason: str, info: dict | None = None) -> None:
+    from .review_sheet import append_review_row
+
+    fields = (info or {}).get("fields") or {}
+    missing = _missing_critical(fields) if info else []
+    try:
+        append_review_row(
+            source,
+            folder=folder.name,
+            file=file,
+            reason=reason,
+            name=(fields.get("name") if isinstance(fields, dict) else "") or "",
+            credit_code=(fields.get("credit_code") if isinstance(fields, dict) else "") or "",
+            missing=",".join(missing),
+        )
+    except Exception:
+        LOG.exception("写入待人工处理表失败")
     from .review_sheet import append_review_row
 
     fields = (info or {}).get("fields") or {}
@@ -1646,11 +1766,12 @@ def process_license_library(
 
     1. Scan company subfolders in source_dir (中国执照库)
     2. First-round OCR: licenses + 身份证正/反面 (copy as stem-正面/反面)
-    3. Missing ID sides → 待人工处理.xlsx, do not translate
+    3. Missing ID sides → skip this round (stay in 执照库, retry next scan)
     4. Pick the clearest license (most OCR lines, then largest file)
     5. Full OCR + translate → output PDF in the company folder
-    6. AI arbitration fail → 待人工处理.xlsx (stay put)
-    7. Move passing company folders to dest_dir (资料)
+    6. OCR timeout / missing fields → retry, then stay in 执照库 (not the sheet)
+    7. AI semantic arbitration fail → 待人工处理.xlsx (stay put)
+    8. Move passing company folders to dest_dir (资料)
 
     Returns {"processed": N, "failed": N, "moved": N, "skipped": N, "review": N}.
     """
@@ -1752,10 +1873,9 @@ def _process_license_library_locked(
         missing_id = [s for s in ("正面", "反面") if s not in id_sides]
         if missing_id:
             reason = "缺身份证" + "、".join(missing_id)
-            _note_review(source, folder, "", reason)
             if log:
-                log(f"[{i}/{total}] {folder.name}: {reason}, 不翻译", "warn")
-            review += 1
+                log(f"[{i}/{total}] {folder.name}: {reason}, 留在执照库下次再扫", "warn")
+            skipped += 1
             continue
 
         best_img, _best_quick_lines = _pick_best_license(licenses)
@@ -1768,20 +1888,42 @@ def _process_license_library_locked(
     # --- Pass 2: convert + move in parallel (3 workers) ---
     convert_workers = min(3, len(convert_tasks))
 
+    CONVERT_ATTEMPTS = 3
+
     def _convert_and_move(task):
         folder, best_img, dest_pdf, id_fields = task
-        try:
-            info = convert_image(best_img, dest_pdf, ocr=eng, work_dir=ROOT / "license_work")
-        except NotFormatA as exc:
-            _note_review(source, folder, best_img.name, f"非A格式: {exc}")
-            return ("skip", folder, dest_pdf, str(exc), None)
-        except Exception as exc:
-            _note_review(source, folder, best_img.name, f"翻译失败: {exc}")
-            return ("fail", folder, dest_pdf, str(exc), None)
-        reason = _arbitration_fail_reason(info)
+        info = None
+        last_exc: BaseException | None = None
+        for attempt in range(1, CONVERT_ATTEMPTS + 1):
+            try:
+                info = convert_image(best_img, dest_pdf, ocr=eng, work_dir=ROOT / "license_work")
+                last_exc = None
+            except NotFormatA as exc:
+                return ("skip", folder, dest_pdf, f"非A格式: {exc}", None)
+            except Exception as exc:
+                last_exc = exc
+                if _is_ocr_transient(exc) and attempt < CONVERT_ATTEMPTS:
+                    LOG.warning("OCR 失败, 重试 %d/%d %s: %s", attempt, CONVERT_ATTEMPTS, folder.name, exc)
+                    if log:
+                        log(f"  {folder.name}: OCR 失败, 重试 {attempt}/{CONVERT_ATTEMPTS-1}…", "warn")
+                    time.sleep(1.5)
+                    continue
+                return ("fail", folder, dest_pdf, str(exc), None)
+            reason = _arbitration_fail_reason(info)
+            if reason.startswith("缺失字段") and attempt < CONVERT_ATTEMPTS:
+                LOG.warning("缺字段 %s, 重试 %d/%d %s", reason, attempt, CONVERT_ATTEMPTS, folder.name)
+                if log:
+                    log(f"  {folder.name}: {reason}, 重试 {attempt}/{CONVERT_ATTEMPTS-1}…", "warn")
+                continue
+            break
+        if last_exc is not None:
+            return ("fail", folder, dest_pdf, str(last_exc), None)
+        reason = _arbitration_fail_reason(info or {})
         if reason:
-            _note_review(source, folder, best_img.name, reason, info)
-            return ("review", folder, dest_pdf, reason, info)
+            if _is_semantic_review(info, reason):
+                _note_review(source, folder, best_img.name, reason, info)
+                return ("review", folder, dest_pdf, reason, info)
+            return ("fail", folder, dest_pdf, reason, info)
         try:
             _write_cn_meta(folder, info, id_fields)
         except Exception:
@@ -1832,7 +1974,7 @@ def _process_license_library_locked(
                 elif kind == "fail":
                     failed += 1
                     if log:
-                        log(f"  ✗ {folder.name}: {msg}", "err")
+                        log(f"  ✗ {folder.name}: {msg}, 留在执照库下次再转", "err")
                 elif kind == "moved_fail":
                     processed += 1
                     if log:

@@ -164,28 +164,40 @@ business license (营业执照) is issued as a PDF.
 
 Compare the Chinese fields with the English fields.
 
-FAIL only for severe problems:
+FAIL only for BLOCKING problems:
 - 经营范围 Chinese is actually an address, URL, seal, or watermark.
-- English 经营范围 is incoherent, leftover house numbers, or does not
-  contain the main business activities present in Chinese.
-- Company name English is not a translation of the Chinese name.
-- Dates that are impossible (issue date years before establishment by >1 year
-  without explanation), or Business Term ending in "(blank)".
-- English still contains Chinese characters.
+- English 经营范围 is empty, leftover Chinese characters, or leftover
+  house numbers with no business items.
+- Company name English is a different company, not a translation.
+- Business Term ending in "(blank)".
 
-Do NOT fail for style, comma vs semicolon, "Co., Ltd." vs "Limited",
-or minor word-order differences in addresses.
+Do NOT fail (use advisory) for:
+- glossary punctuation, "sales of X sales", missing commas
+- one catalog item slightly off or merged
+- "Co., Ltd." vs "Limited", address word order
+- translations that are readable even if imperfect
+
+If unsure, decision=pass and severity=advisory.
 
 You must NOT rewrite any field. Decision only.
 
 Return JSON only:
 {
   "decision": "pass" | "fail",
+  "severity": "blocking" | "advisory",
   "confidence": 0.0,
   "reasons": ["..."],
   "field_failures": {"scope": "short reason"}
 }
 """
+
+
+_BLOCKING_HINT = re.compile(
+    r"住所|地址当范围|address.?as.?scope|not a translation|"
+    r"leftover chinese|残留中文|house number|门牌号|"
+    r"empty english|英译为空|seal|watermark|印章|网址",
+    re.I,
+)
 
 
 def ai_gate(
@@ -225,6 +237,7 @@ def ai_gate(
     if not isinstance(result, dict):
         return None
     decision = str(result.get("decision") or "pass").strip().lower()
+    severity = str(result.get("severity") or "").strip().lower()
     try:
         confidence = float(result.get("confidence") or 0)
     except (TypeError, ValueError):
@@ -234,7 +247,13 @@ def ai_gate(
     if not isinstance(failures, dict):
         failures = {}
     failures = {str(k): str(v) for k, v in failures.items() if k}
-    if decision != "fail":
+    blob = " ".join(reasons) + " " + " ".join(failures.values())
+    blocking = severity == "blocking" or (
+        severity != "advisory" and bool(_BLOCKING_HINT.search(blob))
+    )
+    if decision != "fail" or not blocking:
+        if decision == "fail":
+            LOG.info("[AI] 语义仲裁 advisory, 不拦截: %s", "; ".join(reasons[:2]))
         return ArbitrationResult(passed=True, source="ai")
     if confidence < 0.7 and not failures:
         LOG.info("[AI] 语义仲裁 fail 但置信不足 (%.2f), 放行", confidence)

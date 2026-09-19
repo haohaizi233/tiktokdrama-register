@@ -193,12 +193,16 @@ def scope_text_is_plausible(value: str, address: str = "") -> bool:
         return False
     if _SCOPE_ADDRESS_FRAG_RE.search(t):
         return False
+    if re.search(r"烟草制品零建|制品零建设", t):
+        return False
     has_biz = bool(_SCOPE_BUSINESS_RE.search(t))
     header_stripped = re.sub(
         r"^(?:许可经营项目|许可项目|一般经营项目|一般项目)[:：]?",
         "",
         t,
     )
+    if not header_stripped:
+        return False
     if re.match(r"许可项目所", t):
         return False
     if re.match(r"许可项目所?[省市县]", t) and not _SCOPE_BUSINESS_RE.search(t[4:]):

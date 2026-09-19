@@ -703,6 +703,10 @@ def english_scope_is_weak(zh: str, en: str) -> bool:
         return True
     if re.search(r"[A-Za-z]\d{4,}", en_c):
         return True
+    if re.search(r"(?:SC)?JDGL|CJDGL", en_c, re.I):
+        return True
+    if re.search(r"construction of Licensed items", en_c, re.I):
+        return True
     if re.search(r"special-purpose|creativeA\d", en_c, re.I):
         return True
     if re.search(r"\)\s*:|\(\s*Can\s*\)|\boffice\d", en_c, re.I):
@@ -838,6 +842,15 @@ def sanitize_english_scope(text: str) -> str:
     """English Business Scope must not contain CJK or the printed page footer."""
     text = _strip_en_scope_footer(text or "")
     text = re.sub(r"https?://\S*gsxt\S*", "", text, flags=re.I)
+    text = re.sub(r"\b(?:SC)?(?:JDGL|CJDGL|SCJDGL)\b", "", text, flags=re.I)
+    text = re.sub(r"\b91\d{6}[A-Z0-9]{8,}\b", "", text)
+    text = re.sub(
+        r"construction of Licensed items:\s*",
+        "Licensed items: ",
+        text,
+        flags=re.I,
+    )
+    text = text.replace("；", ";").replace("，", ",").replace("。", ".")
     text = _CJK_RE.sub("", text)
     text = re.sub(r"\s*;\s*;", ";", text)
     text = re.sub(r"\s+", " ", text)
@@ -952,9 +965,14 @@ def translate_address(text: str, prefer: list[str] | None = None) -> str:
     cn_num = "[一二三四五六七八九十百千万]+"
     cn_units = re.findall(rf"({cn_num})({unit_kinds})", rest)
     unit_en = []
+    prev_kind = ""
     for num, kind in units:
-        unit_en.append(UNIT_SUFFIXES.get(kind, "{num}").format(num=num))
+        if kind == "号" and prev_kind in {"栋", "幢", "座", "楼"}:
+            unit_en.append(f"Room {num}")
+        else:
+            unit_en.append(UNIT_SUFFIXES.get(kind, "{num}").format(num=num))
         rest = rest.replace(f"{num}{kind}", "", 1)
+        prev_kind = kind
     cn_map = {"一": "1", "二": "2", "三": "3", "四": "4", "五": "5", "六": "6", "七": "7", "八": "8", "九": "9", "十": "10"}
     for num_cn, kind in cn_units:
         if num_cn in cn_map:

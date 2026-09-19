@@ -186,7 +186,7 @@ def test_scope_broken_ignores_truncated_legal_footer():
 
 def test_scope_watermark_fails_rules():
     from license_trans.rule_repair import field_passes_rules
-    junk = "经营范般项日:建筑材料销售:CJDGL"
+    junk = "经营范般项日:CJDGL"
     good = "般项目:建筑材料销售:金属材料销售:木材销售"
     assert field_passes_rules("scope", junk) is False
     assert field_passes_rules("scope", good) is True
@@ -194,7 +194,7 @@ def test_scope_watermark_fails_rules():
 
 def test_ai_retry_list_is_deduped(monkeypatch):
     fields = LicenseFields(
-        scope="经营范般项日:建筑材料销售:CJDGL",
+        scope="经营范般项日:CJDGL",
         name="测试有限公司",
         address="山东省青岛市黄岛区团结路1号",
     )

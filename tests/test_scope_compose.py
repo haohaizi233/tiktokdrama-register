@@ -302,6 +302,125 @@ def test_kaiping_garbled_scope_is_implausible():
     assert scope_text_is_plausible(junk) is False
     assert translate_scope(junk) == ""
     assert english_scope_is_weak(
-        junk,
-        "Licensed items: live poultry):production: (Can) (Food production) ( office1， related carry out business activities)",
+        junk, "Licensed items: live poultry); production: bottled (can) drinking water",
     )
+
+
+def test_haohang_dot_header_keeps_general_items():
+    from license_trans.parse import clip_scope_text
+    from license_trans.rule_repair import scope_text_is_plausible
+    from license_trans.translate import english_scope_is_weak
+
+    blob = (
+        "·般项目，计算机软硬件及辅助设备零售:计算机软硬件及辅助设备批发"
+        "用百货销售，文具用品零售:文具用品批发，办公用品销售"
+        "路266号新马金谷三期C1栋207号"
+        "销售需要许可的商品)办公设备耗材销售"
+        "销售:日用家电零售(除依法须经批准的项目外，凭营业执照依法自主开展经营活动。"
+        "许可项目:，烟草制品零建设工程施工(依法须经批准的项目，经相关部门批准后方可开展经营活动"
+    )
+    clipped = clip_scope_text(blob)
+    assert "一般项目" in clipped
+    assert "计算机软硬件" in clipped
+    assert "日用百货" in clipped
+    assert "许可项目" in clipped
+    assert "烟草制品零售" in clipped
+    assert "建设工程施工" in clipped
+    assert "266号" not in clipped
+    assert "烟草制品零建" not in clipped
+    assert "体育用品及器材" in clip_scope_text(
+        "五金产以量心，优春用总及我材零售，体育用品及器材批发"
+    )
+    assert scope_text_is_plausible(clipped)
+
+    glue = (
+        "许可项目：烟草制品零建设工程施工"
+        "(依法须经批准的项目，经相关部门批准后方可开展经营活动"
+    )
+    from license_trans.pipeline import _scope_truncated
+    assert _scope_truncated(glue)
+    assert "烟草制品零售" in clip_scope_text(glue)
+    en = translate_scope(clipped)
+    assert leftover_cjk(en) == []
+    assert en.startswith("General items:")
+    assert "Licensed items:" in en
+    assert "construction of Licensed items" not in en
+    assert "tobacco" in en.lower()
+    assert "software" in en.lower() or "computer" in en.lower()
+    assert english_scope_is_weak(
+        glue,
+        "construction of Licensed items: tobacco products construction",
+    )
+
+
+def test_haohang_ocr_lines_keep_left_column_scope():
+    from license_trans.ocr import OcrLine
+    from license_trans.parse import parse_license
+    from license_trans.pipeline import _harvest_from_ocr, _scope_from_ocr_lines
+    from license_trans.field_state import FieldStateTracker
+
+    lines = [
+        OcrLine("营业执照", 0.9, 304, 100, 720, 195),
+        OcrLine("名称 株洲市浩航商贸有限公司", 0.9, 63, 233, 358, 256),
+        OcrLine("类型 有限责任公司(自然人投资或控股)", 0.9, 59, 259, 413, 281),
+        OcrLine("法定代表人 李晖", 0.9, 54, 286, 205, 314),
+        OcrLine("住", 0.9, 578, 314, 596, 336),
+        OcrLine("所 湖南省株洲市天元区马家河街道新马南", 0.9, 667, 314, 995, 336),
+        OcrLine("经营范围", 0.9, 55, 318, 162, 336),
+        OcrLine("·般项目，计算机软硬件及辅助设备零售:计算机软硬件及辅助设备批发", 0.9, 178, 318, 504, 330),
+        OcrLine("用百货销售，文具用品零售:文具用品批发，办公用品销售:互联网销售(除", 0.9, 170, 327, 528, 338),
+        OcrLine("路266号新马金谷三期C1栋207号", 0.9, 692, 331, 953, 353),
+        OcrLine("销售需要许可的商品)办公设备耗材销售，劳动保护用品销售;家居用品销", 0.9, 169, 335, 528, 361),
+        OcrLine("销售:日用家电零售(除依法须经批准的项目外", 0.9, 170, 467, 389, 481),
+        OcrLine("，烟草制品零", 0.9, 314, 475, 377, 487),
+        OcrLine("建设工程施工(依法须经批", 0.9, 395, 475, 528, 489),
+        OcrLine("营活动。许可项目:", 0.9, 170, 480, 268, 487),
+        OcrLine("准的项目，经相关部门批准后方可开展经营活动", 0.9, 170, 488, 387, 502),
+    ]
+    fields = parse_license(lines)
+    from_lines = _scope_from_ocr_lines(lines)
+    assert "一般项目" in (fields.scope or from_lines)
+    assert "计算机软硬件" in (fields.scope or from_lines)
+    assert "266号" not in (fields.scope or "")
+    assert "266号" not in from_lines
+
+    fields.scope = (
+        "许可项目：烟草制品零建设工程施工"
+        "(依法须经批准的项目，经相关部门批准后方可开展经营活动"
+    )
+    tracker = FieldStateTracker()
+    tracker.init_field("scope", fields.scope)
+    _harvest_from_ocr(fields, tracker, [ln.text for ln in lines], lines)
+    assert "一般项目" in fields.scope
+    assert "计算机软硬件" in fields.scope
+    assert "烟草制品零售" in fields.scope
+    assert "建设工程施工" in fields.scope
+    assert "烟草制品零建" not in fields.scope
+
+
+def test_combine_scope_appends_licensed_tail():
+    from license_trans.pipeline import _combine_scope
+
+    general = (
+        "一般项目：计算机软硬件及辅助设备零售；日用百货销售；文具用品批发"
+        "（除依法须经批准的项目外，凭营业执照依法自主开展经营活动）"
+    )
+    licensed = "许可项目：酒类经营；烟草制品零售；建设工程施工（依法须经批准的项目，经相关部门批准后方可开展经营活动）"
+    merged = _combine_scope(general, licensed)
+    assert "一般项目" in merged
+    assert "计算机软硬件" in merged
+    assert "许可项目" in merged
+    assert "烟草制品零售" in merged
+    assert "建设工程施工" in merged
+
+
+def test_haohang_address_room_after_building():
+    from license_trans.translate import translate_address
+
+    en = translate_address(
+        "湖南省株洲市天元区马家河街道新马南路266号新马金谷三期C1栋207号"
+    )
+    assert "Room 207" in en
+    assert "Building C1" in en
+    assert "No. 266" in en
+    assert "No. 207" not in en

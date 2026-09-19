@@ -72,7 +72,11 @@ OCR_FIXES = (
     ("体存用品", "体育用品"),
     ("礼品花客", "礼品花卉"),
     ("厨具卫吴", "厨具卫具"),
+    ("厨兵卫具", "厨具卫具"),
     ("器材批售", "器材批发"),
+    ("计算机软品", "计算机软硬件及辅助设备"),
+    ("销锦售", "销售"),
+    ("医医疗器械", "医疗器械"),
     ("前包销售", ""),
 )
 
@@ -157,9 +161,23 @@ def _fix_ocr_text(text: str) -> str:
     text = re.sub(r"(\d+[A-Za-z]?(?:-\d+[A-Za-z]?)?)销", r"\1铺", text)
     text = re.sub(r"销\d+号售", "销售", text)
     text = re.sub(r"号般项目", "一般项目", text)
+    # WeChat often drops 一 (·般项目 / 般项目，计算机…). Do not rematch 一般项目.
+    text = re.sub(r"(?<![一股胶号])[·•．.\-、]*般项目", "一般项目", text)
     text = re.sub(r"机\d+号械", "机械", text)
     # A comma right after 一般项目/许可项目 is a misread of the colon.
     text = re.sub(r"(一般项目|许可项目|许可经营项目|一般经营项目)，", r"\1：", text)
+    # Line-wrap dropped 日 (批发 / 用百货销售).
+    text = re.sub(r"(?<![日目百])用百货销售", "日用百货销售", text)
+    # 烟草制品零售 wrapped as 烟草制品零 + 建设工程施工.
+    text = re.sub(r"烟草制品零(?!售)", "烟草制品零售", text)
+    text = re.sub(r"(烟草制品零售)(?=建设|酒类|许可)", r"\1；", text)
+    text = re.sub(r"(酒类经营)(?=；?烟草|建设)", r"\1；", text)
+    text = re.sub(r"以量心，优春用总及我材", "体育用品及器材", text)
+    text = re.sub(
+        r"外法自主开展经，?[；;]*\(依法须经批营活动。",
+        "外，凭营业执照依法自主开展经营活动。",
+        text,
+    )
     # Trailing-工/售 truncations at line boundaries.
     text = re.sub(r"工程施(?![工])", "工程施工", text)
     text = re.sub(r"设备销(?![售])", "设备销售", text)
@@ -308,9 +326,22 @@ def clip_scope_text(text: str) -> str:
     compact = re.sub(r"^.*?有限责任公司\(自然人[^)]{0,24}\)", "", compact)
     compact = re.sub(r"^(20\d{2}年\d{1,2}月\d{1,2}日至20\d{2}年\d{1,2}月\d{1,2}日)+", "", compact)
     markers = ("许可经营项目", "许可项目", "一般经营项目", "一般项目")
-    hits = [compact.find(m) for m in markers if m in compact]
+    hits = [(compact.find(m), m) for m in markers if m in compact]
     if hits:
-        compact = compact[min(hits) :]
+        start, mark = min(hits, key=lambda item: item[0])
+        prefix = compact[:start]
+        prefix_biz = bool(re.search(r"销售|批发|零售|服务|制造", prefix))
+        # Dense left-column 一般项目 lost its header, so the first marker is
+        # 许可项目 at the tail (株洲浩航 ·般项目 / 计算机软硬件…).
+        if mark.startswith("许可") and prefix_biz and len(prefix) >= 24:
+            m = re.search(
+                r"计算机软硬件|日用百货|文具用品|机械设备|食品销售|"
+                r"建筑材料|劳务服务|农副产品|办公用品",
+                prefix,
+            )
+            compact = ("一般项目：" + compact[m.start():]) if m else compact[start:]
+        else:
+            compact = compact[start:]
     for stop in ("登记机关", "注册资本", "注册资金", "营业期限", "经营期限",
                  "成立日期", "注册日期", "住所", "住（所", "住(所",
                  "副本", "(副 本)", "(副本)", "（副本）"):
@@ -335,7 +366,44 @@ def clip_scope_text(text: str) -> str:
     compact = re.sub(r"(?<![A-Za-z0-9])(?:SCJDGL|SGJDGL|SJDGL|CJDGL|SCJDGI|SCJDG|SIDGL|SODGL|SOJDGL|SUJDGL|SCJD|CJDG|JDGL|SJD|OGL|DGL)(?![A-Za-z0-9])", "", compact)
     compact = re.sub(r"(?:SCJDGL|SJDGL|CJDG|JDGL)+[（(]?$", "", compact)
     compact = re.sub(r"[（(]+$", "", compact)
+    # Right-column 住所 wrap glued into 经营范围 (浩航 路266号…C1栋207号).
+    compact = re.sub(
+        r"(?:[路街道巷]\d+号)[\u4e00-\u9fffA-Za-z0-9]{0,24}(?:[A-Za-z]?\d*栋)\d+号",
+        "",
+        compact,
+    )
+    compact = _reposition_licensed_items(compact)
     return compact.strip(" :：;；,，、")
+
+
+_LICENSED_ITEM_RE = re.compile(
+    r"(酒类经营|烟草制品零售|烟草制品批发|建设工程施工)"
+)
+
+
+def _reposition_licensed_items(text: str) -> str:
+    """Move licensed-item atoms that OCR placed before the 许可项目 header."""
+    t = text or ""
+    idx = t.find("许可项目")
+    if idx < 0:
+        return t
+    before, after = t[:idx], t[idx:]
+    moved: list[str] = []
+
+    def _take(match: re.Match) -> str:
+        moved.append(match.group(1))
+        return ""
+
+    before2 = _LICENSED_ITEM_RE.sub(_take, before)
+    if not moved:
+        return t
+    after = re.sub(
+        r"^(许可项目[:：]?)",
+        lambda m: m.group(1) + "；".join(moved) + "；",
+        after,
+        count=1,
+    )
+    return re.sub(r"[；;]{2,}", "；", before2 + after)
 
 
 def _strip_scope_page_footer(text: str) -> str:

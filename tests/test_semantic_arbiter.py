@@ -74,9 +74,10 @@ def test_ai_fail_blocks_when_rules_pass():
         def chat_json(self, *a, **k):
             return {
                 "decision": "fail",
+                "severity": "blocking",
                 "confidence": 0.95,
-                "reasons": ["English scope omits jewelry sales"],
-                "field_failures": {"scope": "missing items"},
+                "reasons": ["Chinese scope is an address, not business items"],
+                "field_failures": {"scope": "address_as_scope"},
             }
 
     fields = {
@@ -95,6 +96,40 @@ def test_ai_fail_blocks_when_rules_pass():
     out = arbitrate(fields, english, client=FakeAI())
     assert out.passed is False
     assert out.source == "ai"
+
+
+def test_ai_advisory_compose_issues_do_not_block():
+    class FakeAI:
+        def is_available(self):
+            return True
+
+        def chat_json(self, *a, **k):
+            return {
+                "decision": "fail",
+                "severity": "advisory",
+                "confidence": 0.9,
+                "reasons": [
+                    "English scope is incoherent and contains leftover fragments: "
+                    "'sales of internet sales (; sales of stationery)'"
+                ],
+                "field_failures": {"scope": "awkward glossary compose"},
+            }
+
+    fields = {
+        "name": "株洲市浩航商贸有限公司",
+        "scope": "一般项目：日用百货销售；文具用品批发；互联网销售",
+        "legal_person": "李晖",
+        "capital": "贰佰万元整",
+        "credit_code": "91430211MA7MWFUJ1U",
+        "warnings": [],
+    }
+    english = {
+        "name": "Zhuzhou Haohang Trading Co., Ltd.",
+        "scope": "General items: sales of daily necessities; wholesale of stationery; internet sales",
+        "legal_person": "Li Hui",
+    }
+    out = arbitrate(fields, english, client=FakeAI())
+    assert out.passed is True
 
 
 def test_blank_term_repairs_to_long_term():
