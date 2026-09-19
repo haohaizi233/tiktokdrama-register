@@ -10,7 +10,7 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+from paths import APP_ROOT as ROOT
 sys.path.insert(0, str(ROOT))
 
 def _log(msg: str) -> None:
@@ -93,9 +93,29 @@ def ensure_dependencies() -> None:
             sys.exit(1)
         _log("Chromium 就绪")
 
+def _preload_onnxruntime_dlls() -> None:
+    """打包后用 ctypes 预加载 onnxruntime.dll / DirectML.dll,
+    确保后续 import onnxruntime 时 pyd 的 DllMain 能找到依赖。"""
+    import ctypes
+    from pathlib import Path
+    capi = Path(sys._MEIPASS) / "onnxruntime" / "capi"
+    for dll in ("onnxruntime.dll", "DirectML.dll", "onnxruntime_providers_shared.dll"):
+        p = capi / dll
+        if p.exists():
+            try:
+                ctypes.CDLL(str(p))
+            except OSError:
+                pass
+
+
 def main() -> None:
-    ensure_tkinter()
-    ensure_dependencies()
+    if getattr(sys, "frozen", False):
+        # 打包模式: 依赖已捆绑, 跳过脚本模式的自检/自动安装/Chromium探测
+        _log(f"启动(打包模式): exe={sys.executable}")
+        _preload_onnxruntime_dlls()
+    else:
+        ensure_tkinter()
+        ensure_dependencies()
     import gui_app
     auto = 0
     if "--auto" in sys.argv:

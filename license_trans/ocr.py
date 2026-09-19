@@ -342,6 +342,13 @@ def _onnx_providers(timeout: float = 5.0) -> list[str]:
     Importing onnxruntime / probing CUDA EP in-process can hang on Windows.
     A subprocess timeout always returns so callers are never stuck.
     """
+    if getattr(sys, "frozen", False):
+        # 打包后 sys.executable 是 exe, 不能用 exe -c 起子进程; 进程内探测
+        try:
+            import onnxruntime as ort
+            return list(ort.get_available_providers()) or ["CPUExecutionProvider"]
+        except Exception:
+            return ["CPUExecutionProvider"]
     script = (
         "import json,sys\n"
         "try:\n"
