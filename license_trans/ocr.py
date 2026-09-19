@@ -857,11 +857,26 @@ class LicenseOCR:
             if _keyword_hits(corrected_lines) >= _keyword_hits(best_lines):
                 best_img = corrected
                 best_lines = corrected_lines
-        # Combined seal removal + CLAHE in one pass (saves one OCR pass)
-        enhanced_clean = _enhance_and_clean(best_img)
-        LOG.info("[OCR] 去章增强再识别…")
-        enhanced_clean_lines = _run_ocr(self._ocr, enhanced_clean)
-        merged = _merge_lines(best_lines, enhanced_clean_lines)
+        # Combined seal removal + CLAHE. Skip when the page is already
+        # readable — destain on a 2400px retry is what timed out the
+        # WeChat native thread mid-library-scan.
+        if _keyword_hits(best_lines) >= 5 and len(best_lines) >= 18:
+            LOG.info(
+                "[OCR] 已有 %d 行/%d 关键词, 跳过去章增强",
+                len(best_lines), _keyword_hits(best_lines),
+            )
+            merged = best_lines
+        else:
+            enhanced_clean = _enhance_and_clean(best_img)
+            LOG.info("[OCR] 去章增强再识别…")
+            try:
+                enhanced_clean_lines = _run_ocr(self._ocr, enhanced_clean)
+                merged = _merge_lines(best_lines, enhanced_clean_lines)
+            except TimeoutError:
+                LOG.warning(
+                    "[OCR] 去章增强超时, 沿用已有 %d 行", len(best_lines),
+                )
+                merged = best_lines
         merged.sort(key=lambda line: (round(line.y0 / 18), line.x0))
         if meta is not None:
             meta["rotation"] = best_k

@@ -33,7 +33,7 @@ LOG = logging.getLogger("license_trans.ocr")
 _WXOCR_DLL = "wxocr.dll"
 _WXOCR_EXE_NAMES = ("WeChatOCR.exe", "WeChatOcr.exe")
 _VERSION_DIR_RE = re.compile(r"^\d+\.\d+")
-_DEFAULT_TIMEOUT = 30.0
+_DEFAULT_TIMEOUT = 60.0
 _INIT_TIMEOUT = 30.0
 
 

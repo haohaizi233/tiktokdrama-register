@@ -4,7 +4,7 @@
     "enabled": true,
     "wechat_path": null,
     "ocr_path": null,
-    "timeout": 30,
+    "timeout": 60,
     "fallback_ppocr": false
   },
   "ai": {

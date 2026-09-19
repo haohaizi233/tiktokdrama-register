@@ -21,8 +21,9 @@ class DualOcrEngine:
     """Inner engine used by LicenseOCR: WeChat first, PP-OCRv6 only if loaded.
 
     When PP-OCR is not loaded, WeChat empty results stay empty so LicenseOCR
-    can try the next rotation. Timeout / runtime failure is sticky for the
-    process — reset() must not revive a hung wxocr.dll.
+    can try the next rotation. A single slow photo must not disable WeChat
+    for the rest of a library scan. Only repeated timeouts, or a runtime
+    crash when PP-OCR exists, stick the engine off.
     """
 
     def __init__(
@@ -36,6 +37,7 @@ class DualOcrEngine:
         self._ppocr = ppocr
         self._timeout = timeout
         self._disable_wechat = False
+        self._wechat_timeouts = 0
         self.primary_name = "wechat" if wechat is not None else "ppocr_v6"
         self.last_actual = self.primary_name
         self.last_fallback_used = wechat is None
@@ -117,6 +119,7 @@ class DualOcrEngine:
                     self.last_actual = "wechat"
                     self.last_fallback_used = False
                     self.last_reason = None
+                    self._wechat_timeouts = 0
                     return result, elapse
                 LOG.warning("[OCR] WeChat 空结果, %.2fs", float(elapse or 0))
                 if self._ppocr is None:
@@ -126,10 +129,16 @@ class DualOcrEngine:
                 return self._fallback(image, "wechat_empty")
             except WeChatOcrTimeout:
                 LOG.exception("WeChat OCR timeout")
-                self._disable_wechat = True
-                if self._ppocr is None:
-                    raise
-                return self._fallback(image, "wechat_timeout")
+                self._wechat_timeouts += 1
+                self.last_reason = "wechat_timeout"
+                if self._ppocr is not None:
+                    self._disable_wechat = True
+                    return self._fallback(image, "wechat_timeout")
+                # WeChat-only: one slow destain/photo must not kill the batch.
+                if self._wechat_timeouts >= 3:
+                    self._disable_wechat = True
+                    raise RuntimeError("No OCR engine available") from None
+                raise
             except Exception:
                 LOG.exception("WeChat OCR runtime failed")
                 self._disable_wechat = True
@@ -188,7 +197,7 @@ class OcrService:
         self._wechat_error: str | None = None
         wx_cfg = self._config.get("wechat_ocr") or {}
         wechat_enabled = wx_cfg.get("enabled", True) is not False
-        timeout = float(wx_cfg.get("timeout", 30))
+        timeout = float(wx_cfg.get("timeout", 60))
 
         if init_engines:
             if self._wechat is None and wechat_enabled:

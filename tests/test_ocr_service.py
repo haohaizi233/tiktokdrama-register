@@ -268,7 +268,7 @@ def test_wechat_only_empty_returns_empty():
     assert wx.calls == 1
 
 
-def test_wechat_only_timeout_is_sticky():
+def test_wechat_only_timeout_does_not_kill_batch():
     wx = FakeEngine(error=WeChatOcrTimeout("timed out"))
     dual = DualOcrEngine(wx, None)
     try:
@@ -277,9 +277,28 @@ def test_wechat_only_timeout_is_sticky():
     except WeChatOcrTimeout:
         pass
     dual.reset()
-    try:
-        dual(_img())
-        raise AssertionError("expected RuntimeError after sticky disable")
-    except RuntimeError as exc:
-        assert "No OCR engine" in str(exc)
-    assert wx.calls == 1
+    wx.error = None
+    wx.result = VALID
+    result, _ = dual(_img())
+    assert result == VALID
+    assert wx.calls == 2
+
+
+def test_wechat_only_three_timeouts_then_disable():
+    wx = FakeEngine(error=WeChatOcrTimeout("timed out"))
+    dual = DualOcrEngine(wx, None)
+    for _ in range(3):
+        try:
+            dual(_img())
+        except WeChatOcrTimeout:
+            pass
+        except RuntimeError as exc:
+            assert "No OCR engine" in str(exc)
+            break
+    else:
+        try:
+            dual(_img())
+            raise AssertionError("expected RuntimeError after 3 timeouts")
+        except RuntimeError as exc:
+            assert "No OCR engine" in str(exc)
+    assert wx.calls == 3

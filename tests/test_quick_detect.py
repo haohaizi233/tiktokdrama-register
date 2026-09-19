@@ -153,3 +153,43 @@ def test_recognize_reuses_cached_lines():
                                     assert call_count["n"] <= 4
     finally:
         tmp.unlink(missing_ok=True)
+
+
+def test_recognize_skips_destain_when_page_already_readable():
+    from license_trans.ocr import KEYWORDS, LicenseOCR, OcrLine
+    import threading
+
+    engine = LicenseOCR.__new__(LicenseOCR)
+    engine._ocr = MagicMock()
+    engine._quick_cache = {}
+    engine._cache_lock = threading.Lock()
+    tmp = _tmp_file()
+    lines = [
+        OcrLine(text=k, score=0.9, x0=10, y0=20 * i, x1=200, y1=20 * i + 16)
+        for i, k in enumerate(KEYWORDS)
+    ]
+    lines.extend(
+        OcrLine(text=f"销售项目{i}", score=0.9, x0=10, y0=200 + i * 16, x1=180, y1=214 + i * 16)
+        for i in range(14)
+    )
+    engine._quick_cache[str(tmp.resolve())] = lines
+    destain_calls = {"n": 0}
+    real_img = np.zeros((400, 600, 3), dtype=np.uint8)
+
+    def mock_run_ocr(ocr, image):
+        destain_calls["n"] += 1
+        raise AssertionError("destain OCR should be skipped")
+
+    try:
+        with patch("license_trans.ocr._read_image", return_value=real_img):
+            with patch("license_trans.ocr._downscale", side_effect=lambda x, **kw: x):
+                with patch("license_trans.ocr._ensure_min_size", side_effect=lambda x, **kw: x):
+                    with patch("license_trans.ocr._run_ocr", side_effect=mock_run_ocr):
+                        with patch("license_trans.ocr._deskew", side_effect=lambda x: x):
+                            with patch("license_trans.ocr._correct_perspective", side_effect=lambda x: x):
+                                with patch("license_trans.ocr._zoom_crop_pass", return_value=None):
+                                    oriented, got = engine.recognize(tmp)
+        assert destain_calls["n"] == 0
+        assert len(got) >= 18
+    finally:
+        tmp.unlink(missing_ok=True)
