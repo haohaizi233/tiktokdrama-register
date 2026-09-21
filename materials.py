@@ -124,11 +124,23 @@ def _match_cp575(files: list[Path]) -> Path | None:
     return None
 
 
-def _match_en_license_pdf(files: list[Path]) -> Path | None:
-    for f in files:
-        if "英文版" in f.name and f.suffix.lower() == ".pdf":
-            return f
-    return None
+def _match_en_license_pdf(files: list[Path], preferred: str = "") -> Path | None:
+    """Pick the English-license PDF: cn_meta 记名优先, 否则取最新修改的一份.
+
+    旧逻辑按 iterdir 顺序取第一份, 仲裁失败稿和二次成功稿并存时会抽卡。
+    """
+    pdfs = [f for f in files
+            if f.is_file() and "英文版" in f.name and f.suffix.lower() == ".pdf"]
+    if not pdfs:
+        return None
+    if preferred:
+        for f in pdfs:
+            if f.name == preferred:
+                return f
+    try:
+        return max(pdfs, key=lambda p: p.stat().st_mtime)
+    except OSError:
+        return pdfs[0]
 
 
 def _pick_named_id(files: list[Path], side: str) -> Path | None:
@@ -261,7 +273,7 @@ def _profile_from_folder(folder: Path, row: dict | None = None, *, workflow: str
         p["reg_addr"] = p["reg_addr"] or meta.get("address_en") or meta.get("address_zh") or ""
         # 身份证字段只采用表格(xlsx F~I); 本地 OCR / 法定代表人名不写入填表槽。
         # 没有表格值时认证引擎直接上传, 交给站点识别。
-        en_pdf = _match_en_license_pdf(files)
+        en_pdf = _match_en_license_pdf(files, preferred=meta.get("license_pdf") or "")
         if en_pdf:
             p["biz_proof"] = en_pdf
             p["cp575"] = en_pdf
@@ -797,6 +809,75 @@ def archive_incomplete() -> dict:
     ov = _read_json(OVERRIDES_FILE, {})
     if any(n in ov for n in names):
         for n in names:
+            ov.pop(n, None)
+        _write_json(OVERRIDES_FILE, ov)
+    return report
+
+
+def full_slot_companies() -> list[dict]:
+    """槽位已满(占用数 ≥ COMPANY_SLOTS)的公司, 无法再认证新号."""
+    usage = load_usage()
+    cap = get_company_slots()
+    out = []
+    for p in profiles():
+        n = len(usage.get(p["name"]) or [])
+        if n >= cap:
+            out.append({
+                "name": p["name"],
+                "slots": n,
+                "cap": cap,
+                "folder": p.get("folder"),
+            })
+    return out
+
+
+def delete_full_slot_companies(names: list[str] | None = None) -> dict:
+    """删除满槽公司: 资料文件夹 + usage/blocked/overrides + xlsx 对应行.
+
+    二次确认由 GUI 负责. 返回 {deleted:[{name,error}], errors, xlsx, backup}.
+    """
+    targets = full_slot_companies()
+    if names is not None:
+        want = set(names)
+        targets = [t for t in targets if t["name"] in want]
+    report = {"deleted": [], "errors": [], "xlsx": None, "backup": None}
+    if not targets:
+        return report
+    name_set = {t["name"] for t in targets}
+
+    backup_dir = MATERIALS_DIR / "已满槽"
+    backup = backup_dir / f"汇总表备份_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    xlsx = _drop_xlsx_rows(name_set, backup)
+    if xlsx:
+        report["xlsx"] = str(xlsx)
+        report["backup"] = str(backup)
+
+    for t in targets:
+        entry = {"name": t["name"], "error": None}
+        folder = find_folder(t["name"])
+        if folder:
+            try:
+                shutil.rmtree(folder)
+            except OSError as e:
+                entry["error"] = f"文件夹删除失败: {e}"
+        report["deleted"].append(entry)
+        if entry["error"]:
+            report["errors"].append(f"{t['name']}: {entry['error']}")
+
+    usage = load_usage()
+    for name in name_set:
+        usage.pop(name, None)
+    save_usage(usage)
+
+    blocked = load_blocked()
+    if any(n in blocked for n in name_set):
+        for n in name_set:
+            blocked.pop(n, None)
+        _write_json(_blocked_file(), blocked)
+
+    ov = _read_json(OVERRIDES_FILE, {})
+    if any(n in ov for n in name_set):
+        for n in name_set:
             ov.pop(n, None)
         _write_json(OVERRIDES_FILE, ov)
     return report

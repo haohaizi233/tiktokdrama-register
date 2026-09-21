@@ -214,3 +214,21 @@ def reclaim_assigned() -> list[dict]:
 
 def count_assigned() -> int:
     return sum(1 for it in _load() if it.get("status") == "assigned")
+
+
+_USED_STATUSES = ("submitted", "discarded")
+
+
+def used_items() -> list[dict]:
+    """已用完的机构名: 提交成功 或 服务端撞名废弃. 不含分配中/失败待核实."""
+    return [dict(it) for it in _load() if it.get("status") in _USED_STATUSES]
+
+
+def clear_used() -> int:
+    """从库中移除 submitted/discarded 记录, 未用和未终态占用不动. 返回删除数."""
+    items = _load()
+    kept = [it for it in items if it.get("status") not in _USED_STATUSES]
+    n = len(items) - len(kept)
+    if n:
+        _save(kept)
+    return n
