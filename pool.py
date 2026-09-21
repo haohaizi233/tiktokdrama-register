@@ -16,7 +16,10 @@ AUTH_DIR = ROOT / "auth"
 LOG_DIR = ROOT / "logs"
 LEGACY_ACCOUNTS = ROOT / "accounts.json"
 SEP = "----"
-EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+# 严格邮箱正则: 只允许常见邮箱字符, 排除引号/逗号/分号等标点
+EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
+# 导入时需要剥离的包裹字符(引号/逗号/分号/空格等)
+_STRIP_CHARS = "\"' \t\r\n,;，；"
 
 def ensure_dirs() -> None:
     for d in (POOL_DIR, AUTH_DIR, LOG_DIR):
@@ -35,7 +38,10 @@ def _new_account(index: int, email: str, password: str, client_id: str, token: s
     }
 
 def parse_lines(text: str) -> tuple[list[tuple[str, str, str, str]], list[str]]:
-    """解析 `序号\t邮箱----密码----client_id----令牌` 文本 → (账号元组列表, 异常行列表)"""
+    """解析 `序号\t邮箱----密码----client_id----令牌` 文本 → (账号元组列表, 异常行列表)
+
+    自动剥离每段首尾的引号/逗号/分号等包裹标点, 并用严格正则校验邮箱格式。
+    """
     accounts, bad = [], []
     for raw in text.splitlines():
         line = raw.strip()
@@ -44,9 +50,9 @@ def parse_lines(text: str) -> tuple[list[tuple[str, str, str, str]], list[str]]:
         m = re.match(r"^(\d+)\s+(.*)$", line)
         if m and SEP in m.group(2):
             line = m.group(2)
-        parts = [p.strip() for p in line.split(SEP)]
+        parts = [p.strip(_STRIP_CHARS) for p in line.split(SEP)]
         if len(parts) != 4 or not EMAIL_RE.match(parts[0]):
-            bad.append(raw.strip()[:60])
+            bad.append(raw.strip(_STRIP_CHARS)[:60])
             continue
         accounts.append((parts[0], parts[1], parts[2], parts[3]))
     return accounts, bad
@@ -65,7 +71,10 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
 def all_accounts() -> list[dict]:
-    """合并号池文件夹内全部json, 同邮箱后者覆盖, 按序号排序"""
+    """合并号池文件夹内全部json, 同邮箱后者覆盖, 按序号排序
+
+    自动剥离邮箱首尾包裹标点(引号等), 跳过校验不通过的脏数据。
+    """
     merged: dict[str, dict] = {}
     for f in _pool_files():
         data = _read_json(f)
@@ -73,8 +82,68 @@ def all_accounts() -> list[dict]:
             continue
         for a in data.get("accounts", []):
             if isinstance(a, dict) and a.get("email"):
-                merged[a["email"]] = a
+                email = a["email"].strip(_STRIP_CHARS)
+                if not EMAIL_RE.match(email):
+                    continue  # 脏数据(含引号等)直接跳过
+                a["email"] = email  # 原地修正
+                merged[email] = a
     return sorted(merged.values(), key=lambda a: a.get("index", 0))
+
+
+def scan_dirty() -> tuple[list[str], list[str]]:
+    """预览号池脏邮箱. 返回 (可修正原值列表, 应删除原值列表)."""
+    fixable, droppable = [], []
+    seen = set()
+    for f in _pool_files():
+        data = _read_json(f)
+        if not data:
+            continue
+        for a in data.get("accounts", []):
+            if not isinstance(a, dict) or not a.get("email"):
+                continue
+            raw = a["email"]
+            if raw in seen:
+                continue
+            seen.add(raw)
+            clean = raw.strip(_STRIP_CHARS)
+            if EMAIL_RE.match(clean):
+                if clean != raw:
+                    fixable.append(raw)
+            else:
+                droppable.append(raw)
+    return fixable, droppable
+
+
+def clean_pool() -> tuple[int, int]:
+    """清洗号池中所有脏邮箱(含引号/逗号等包裹标点).
+
+    返回 (修正数, 删除数)。修正 = 剥离标点后格式合法; 删除 = 剥离后仍不合法。
+    """
+    fixed, dropped = 0, 0
+    for f in _pool_files():
+        data = _read_json(f)
+        if not data:
+            continue
+        changed = False
+        kept = []
+        for a in data.get("accounts", []):
+            if not isinstance(a, dict) or not a.get("email"):
+                continue
+            raw_email = a["email"]
+            clean = raw_email.strip(_STRIP_CHARS)
+            if not EMAIL_RE.match(clean):
+                dropped += 1
+                changed = True
+                continue
+            if clean != raw_email:
+                a["email"] = clean
+                fixed += 1
+                changed = True
+            kept.append(a)
+        if changed:
+            data["accounts"] = kept
+            _write_json(f, data)
+    return fixed, dropped
 
 def import_text(text: str, source_name: str = "粘贴内容") -> tuple[int, int, list[str]]:
     """导入账号文本 → 新增部分保存为新json. 返回 (新增数, 重复跳过数, 异常行列表)"""
