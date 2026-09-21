@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import threading
 import time
 from datetime import date
@@ -1542,6 +1543,44 @@ def convert_image(
     )
     if not arbitration.passed:
         LOG.warning("出PDF前语义仲裁未通过: %s", "; ".join(arbitration.reasons[:4]))
+        # 失败不落 PDF: 否则执照库里会留下失败稿, 二次翻译过了又多一份, 认证抽卡
+        display = _display_view(oriented, lines, meta)
+        canonical_dict = canonical.to_translation_input()
+        result = {
+            "input": str(image_path),
+            "output": "",
+            "trace_id": trace.trace_id,
+            "fields": canonical_dict,
+            "english": english,
+            "ocr": [line.to_dict() for line in lines],
+            "qr_data": qr_data,
+            "canonical": canonical.to_dict(),
+            "ocr_primary": canonical.ocr_primary,
+            "ocr_actual": canonical.ocr_actual,
+            "fallback_used": canonical.fallback_used,
+            "needs_review": list(canonical.needs_review),
+            "arbitration": arbitration.to_dict(),
+            "events": trace.to_list(),
+            "status": {
+                "ocr_primary": canonical.ocr_primary,
+                "fallback_used": canonical.fallback_used,
+                "ai_validated": canonical.ai_validated,
+                "field_retries": sum(tracker.retry_count(n) for n in tracker.all_fields()),
+                "web_verified": sum(
+                    1 for e in (english.get("provenance") or {}).values()
+                    if isinstance(e, dict) and e.get("provider") == "web_verified"
+                ),
+                "need_review": len(canonical.needs_review),
+                "arbitration_passed": False,
+            },
+        }
+        if work_dir:
+            work_dir = Path(work_dir)
+            work_dir.mkdir(parents=True, exist_ok=True)
+            sidecar = work_dir / ((Path(output_path).stem or "rejected") + ".json")
+            sidecar.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+        LOG.info("仲裁未过, 未生成 PDF  %s", image_path)
+        return result
 
     display = _display_view(oriented, lines, meta)
     LOG.info("渲染英文模板 PDF")
@@ -1648,6 +1687,95 @@ def _arbitration_fail_reason(info: dict) -> str:
     if not (english.get("name") or "").strip():
         return "英译名称为空"
     return ""
+
+
+def _en_pdf_paths(folder: Path) -> list[Path]:
+    if not folder.is_dir():
+        return []
+    return [p for p in folder.iterdir()
+            if p.is_file() and "英文版" in p.name and p.suffix.lower() == ".pdf"]
+
+
+def _has_id_pair(folder: Path) -> bool:
+    if not folder.is_dir():
+        return False
+    stems = {p.stem for p in folder.iterdir() if p.is_file()}
+    return ("id-正面" in stems or "id_正面" in stems) and (
+        "id-反面" in stems or "id_反面" in stems)
+
+
+def _folder_ready_to_move(folder: Path) -> bool:
+    """翻译已成功但上次没搬走: 有 cn_meta + 英文版 PDF + 身份证正反面。"""
+    if not folder.is_dir():
+        return False
+    if not (folder / CN_META_NAME).is_file():
+        return False
+    return bool(_en_pdf_paths(folder)) and _has_id_pair(folder)
+
+
+def _move_company_folder(folder: Path, dest: Path, attempts: int = 3) -> Path:
+    """把公司文件夹搬到资料/, 文件锁时重试, rename 失败再 copy+delete。"""
+    dest.mkdir(parents=True, exist_ok=True)
+    target = dest / folder.name
+    last_exc: OSError | None = None
+    for i in range(1, attempts + 1):
+        try:
+            if target.exists():
+                shutil.rmtree(target)
+            try:
+                folder.rename(target)
+            except OSError:
+                shutil.move(str(folder), str(target))
+            return target
+        except OSError as exc:
+            last_exc = exc
+            time.sleep(0.4 * i)
+    try:
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(folder, target)
+        shutil.rmtree(folder, ignore_errors=True)
+        return target
+    except OSError as exc:
+        raise last_exc or exc
+
+
+def _recover_ready_folders(source: Path, dest: Path, log=None) -> int:
+    """把上次翻译成功但没搬走的文件夹补搬到资料/。返回搬走数量。"""
+    moved = 0
+    if not source.is_dir():
+        return 0
+    for folder in sorted(source.iterdir(), key=lambda p: p.name):
+        if not folder.is_dir() or folder.name in {"资料不全"}:
+            continue
+        if not _folder_ready_to_move(folder):
+            continue
+        try:
+            target = _move_company_folder(folder, dest)
+            moved += 1
+            if log:
+                log(f"  ✓ 补搬已译未移: {folder.name} → {target}", "ok")
+        except OSError as exc:
+            if log:
+                log(f"  ⚠ 补搬失败 {folder.name}: {exc}", "warn")
+    return moved
+
+
+def _purge_en_pdfs(folder: Path, keep: Path | None = None) -> None:
+    """删掉文件夹里的英译 PDF. keep 有值时只留这一份(二次翻译成功后去旧稿)."""
+    keep_res = None
+    if keep is not None:
+        try:
+            keep_res = Path(keep).resolve()
+        except OSError:
+            keep_res = None
+    for p in _en_pdf_paths(folder):
+        try:
+            if keep_res is not None and p.resolve() == keep_res:
+                continue
+            p.unlink()
+        except OSError:
+            pass
 
 
 def _write_cn_meta(folder: Path, info: dict, id_fields: dict | None = None) -> Path:
@@ -1827,6 +1955,18 @@ def _process_license_library_locked(
     total = len(company_folders)
     processed = failed = moved = skipped = review = 0
 
+    recovered = _recover_ready_folders(source, dest, log)
+    if recovered:
+        moved += recovered
+        processed += recovered
+        if log:
+            log(f"补搬上次已译未移 {recovered} 家到资料/", "ok")
+        company_folders = sorted(
+            d for d in source.iterdir()
+            if d.is_dir() and d.name not in {"资料不全"}
+        )
+        total = len(company_folders)
+
     # --- Pass 1: scan folders, quick-detect licenses + ID cards ---
     convert_tasks: list[tuple[Path, Path, Path, dict]] = []  # folder, img, pdf, id_fields
     for i, folder in enumerate(company_folders, start=1):
@@ -1846,6 +1986,12 @@ def _process_license_library_locked(
             and f.name not in skip_names)
         if not images:
             skipped += 1
+            continue
+        if _folder_ready_to_move(folder):
+            # recover 没搬走(文件锁), 不要再 OCR 一遍
+            skipped += 1
+            if log:
+                log(f"[{i}/{total}] {folder.name}: 已译未搬走, 跳过本次翻译", "dim")
             continue
 
         detect_hits: list[tuple[Path, bool, list[OcrLine]]] = []
@@ -1910,6 +2056,7 @@ def _process_license_library_locked(
                 info = convert_image(best_img, dest_pdf, ocr=eng, work_dir=ROOT / "license_work")
                 last_exc = None
             except NotFormatA as exc:
+                _purge_en_pdfs(folder)
                 return ("skip", folder, dest_pdf, f"非A格式: {exc}", None)
             except Exception as exc:
                 last_exc = exc
@@ -1919,6 +2066,7 @@ def _process_license_library_locked(
                         log(f"  {folder.name}: OCR 失败, 重试 {attempt}/{CONVERT_ATTEMPTS-1}…", "warn")
                     time.sleep(1.5)
                     continue
+                _purge_en_pdfs(folder)
                 return ("fail", folder, dest_pdf, str(exc), None)
             reason = _arbitration_fail_reason(info)
             if reason.startswith("缺失字段") and attempt < CONVERT_ATTEMPTS:
@@ -1928,9 +2076,11 @@ def _process_license_library_locked(
                 continue
             break
         if last_exc is not None:
+            _purge_en_pdfs(folder)
             return ("fail", folder, dest_pdf, str(last_exc), None)
         reason = _arbitration_fail_reason(info or {})
         if reason:
+            _purge_en_pdfs(folder)  # 失败稿不留在执照库, 避免二次成功后两套抽卡
             if _is_semantic_review(info, reason):
                 _note_review(source, folder, best_img.name, reason, info)
                 return ("review", folder, dest_pdf, reason, info)
@@ -1939,13 +2089,9 @@ def _process_license_library_locked(
             _write_cn_meta(folder, info, id_fields)
         except Exception:
             LOG.exception("写入 cn_meta 失败")
+        _purge_en_pdfs(folder, keep=dest_pdf)
         try:
-            dest.mkdir(parents=True, exist_ok=True)
-            target = dest / folder.name
-            if target.exists():
-                import shutil
-                shutil.rmtree(target)
-            folder.rename(target)
+            target = _move_company_folder(folder, dest)
             return ("ok", folder, target, "", info)
         except Exception as exc:
             return ("moved_fail", folder, dest_pdf, str(exc), info)
@@ -1996,6 +2142,25 @@ def _process_license_library_locked(
                         log(f"  ✗ {folder.name}: AI仲裁未通过 [{msg}], 已记入待人工处理表", "err")
 
     return {"processed": processed, "failed": failed, "moved": moved, "skipped": skipped, "review": review}
+
+
+def license_library_counts(source: str | Path | None = None) -> tuple[int, int]:
+    """执照库统计: (待翻译/失败残留, 已译未搬走).
+
+    待翻译 = 公司文件夹, 不含已有 cn_meta+英文版+身份证 的卡住货。
+    """
+    src = Path(source) if source else ROOT / "中国执照库"
+    pending = stuck = 0
+    if not src.is_dir():
+        return 0, 0
+    for d in src.iterdir():
+        if not d.is_dir() or d.name in {"资料不全"}:
+            continue
+        if _folder_ready_to_move(d):
+            stuck += 1
+        else:
+            pending += 1
+    return pending, stuck
 
 
 def ensure_cn_reserve(

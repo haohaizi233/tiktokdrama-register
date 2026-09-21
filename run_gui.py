@@ -109,8 +109,23 @@ def _preload_onnxruntime_dlls() -> None:
 
 
 def main() -> None:
+    # 启用 faulthandler: 进程崩溃(segfault等)时自动dump traceback到日志文件,
+    # 帮助诊断挂机闪退(无Python异常、无日志中断的硬崩溃)
+    import faulthandler
+    try:
+        from paths import APP_ROOT
+        _fault_path = APP_ROOT / "logs" / "crash_trace.log"
+        _fault_path.parent.mkdir(exist_ok=True)
+        _fault_log = open(_fault_path, "a", encoding="utf-8", buffering=1)
+        faulthandler.enable(_fault_log)
+        faulthandler.dump_traceback_later(300, repeat=True, file=_fault_log)
+    except Exception:
+        try:
+            faulthandler.enable()
+        except Exception:
+            pass
+
     if getattr(sys, "frozen", False):
-        # 打包模式: 依赖已捆绑, 跳过脚本模式的自检/自动安装/Chromium探测
         _log(f"启动(打包模式): exe={sys.executable}")
         _preload_onnxruntime_dlls()
     else:

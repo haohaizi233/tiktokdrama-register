@@ -182,6 +182,9 @@ class App(tk.Tk):
                    command=self.import_inst_file).pack(side="left")
         ttk.Button(bar2, text="导入下方粘贴内容",
                    command=self.import_inst_paste).pack(side="left", padx=8)
+        self.btn_clear_inst = ttk.Button(
+            bar2, text="清除已用机构名", command=self.clear_used_institutions, width=14)
+        self.btn_clear_inst.pack(side="left", padx=8)
         self.lbl_inst_stat = ttk.Label(
             bar2, text="格式: 每行一条机构名(可带序号)", foreground="#777777")
         self.lbl_inst_stat.pack(side="right", padx=(6, 8))
@@ -207,12 +210,17 @@ class App(tk.Tk):
         self.btn_reset = ttk.Button(bar2, text="重置失败账号",
                                     command=self.reset_failed, width=12)
         self.btn_reset.pack(side="right", padx=(0, 8))
+        self.btn_clean = ttk.Button(bar2, text="清洗号池", command=self.clean_pool, width=10)
+        self.btn_clean.pack(side="right", padx=6)
         ttk.Button(bar2, text="刷新", command=self.refresh_pool, width=8).pack(side="right", padx=6)
         ttk.Button(bar2, text="导出Excel…", command=self.export_excel,
                    width=12).pack(side="right")
         self.btn_archive = ttk.Button(bar2, text="归档资料不全", width=12,
                                       command=self.archive_bad_materials)
         self.btn_archive.pack(side="right", padx=6)
+        self.btn_del_full = ttk.Button(bar2, text="删除满槽公司", width=12,
+                                       command=self.delete_full_slot_companies)
+        self.btn_del_full.pack(side="right", padx=6)
         self.btn_reclaim = ttk.Button(bar2, text="回收未提交占用", width=14,
                                       command=self.reclaim_stale)
         self.btn_reclaim.pack(side="right", padx=(0, 6))
@@ -332,6 +340,9 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("导入失败", str(e), parent=self)
             return
+        # 导入后自动清洗一次(修正旧脏数据)
+        if new:
+            pool.clean_pool()
         parts = [f"新增 {new}"]
         if dup:
             parts.append(f"重复跳过 {dup}")
@@ -475,6 +486,52 @@ class App(tk.Tk):
         self.refresh_pool()
         self._append_log(f"已重置 {n} 个失败账号为可用状态。", "ok")
 
+    def clean_pool(self):
+        """清洗号池脏数据: 剥离邮箱首尾引号/标点, 删除格式仍不合法的。"""
+        if self.worker and self.worker.is_alive():
+            return
+        fixable, droppable = pool.scan_dirty()
+        if not fixable and not droppable:
+            messagebox.showinfo("清洗号池", "号池数据干净, 无需清洗。", parent=self)
+            return
+        samples = (fixable + droppable)[:6]
+        extra = ""
+        if len(fixable) + len(droppable) > 6:
+            extra = f"\n… 等共 {len(fixable) + len(droppable)} 个"
+        if not messagebox.askyesno(
+                "清洗号池",
+                f"发现异常邮箱:\n可修正(去引号/标点) {len(fixable)} 个\n"
+                f"格式不合法将删除 {len(droppable)} 个\n\n"
+                + "\n".join(samples) + extra + "\n\n确定清洗?",
+                parent=self):
+            return
+        fixed, dropped = pool.clean_pool()
+        self.refresh_pool()
+        msg = f"清洗完成: 修正 {fixed} 个, 删除 {dropped} 个(格式不合法)。"
+        self._append_log(msg, "ok" if not dropped else "warn")
+        messagebox.showinfo("清洗完成", msg, parent=self)
+
+    def clear_used_institutions(self):
+        """一键移除已提交/已废弃的机构名, 未用和未终态占用不动."""
+        if self.worker and self.worker.is_alive():
+            return
+        used = institutions.used_items()
+        if not used:
+            messagebox.showinfo("清除已用机构名", "没有已提交或已废弃的机构名。", parent=self)
+            return
+        n_sub = sum(1 for it in used if it.get("status") == "submitted")
+        n_disc = sum(1 for it in used if it.get("status") == "discarded")
+        if not messagebox.askyesno(
+                "清除已用机构名",
+                f"将从机构名库移除已用记录:\n已提交 {n_sub} 个\n已废弃(撞名) {n_disc} 个\n\n"
+                "未用 / 分配中 / 失败待核实的不会动。确定？",
+                parent=self):
+            return
+        n = institutions.clear_used()
+        self.refresh_pool()
+        self._append_log(f"已清除 {n} 个已用机构名。", "ok")
+        messagebox.showinfo("清除完成", f"已移除 {n} 个已用机构名。", parent=self)
+
     def reclaim_stale(self):
         if self.worker and self.worker.is_alive():
             return
@@ -555,6 +612,56 @@ class App(tk.Tk):
                 f"已归档 {len(report['archived'])} 家资料不全公司。\n\n"
                 f"原汇总表备份: {report['backup']}\n"
                 "归档目录: 资料/资料不全/", parent=self)
+        self.refresh_pool()
+
+    def delete_full_slot_companies(self):
+        """一键删除槽位已满的公司(两次确认)."""
+        if self.worker and self.worker.is_alive():
+            return
+        try:
+            targets = materials.full_slot_companies()
+        except Exception as e:
+            messagebox.showerror("资料不可用", f"读取公司槽位失败: {e}", parent=self)
+            return
+        if not targets:
+            messagebox.showinfo("删除满槽公司", "当前没有槽位已满的公司。", parent=self)
+            return
+        lines = [f"· {t['name']}  {t['slots']}/{t['cap']}" for t in targets[:10]]
+        if len(targets) > 10:
+            lines.append(f"… 等共 {len(targets)} 家")
+        if not messagebox.askyesno(
+                "删除满槽公司",
+                f"以下 {len(targets)} 家公司槽位已满, 无法再认证新号:\n\n"
+                + "\n".join(lines)
+                + "\n\n将删除其资料文件夹和用量记录。继续？",
+                parent=self):
+            return
+        if not messagebox.askyesno(
+                "再次确认",
+                f"此操作不可恢复。确定删除这 {len(targets)} 家满槽公司？",
+                parent=self):
+            return
+        try:
+            report = materials.delete_full_slot_companies(
+                [t["name"] for t in targets])
+        except Exception as e:
+            messagebox.showerror("删除失败", str(e), parent=self)
+            return
+        n_ok = sum(1 for r in report["deleted"] if not r.get("error"))
+        for r in report["deleted"]:
+            if r.get("error"):
+                self._append_log(f"[满槽删除] {r['name']}: {r['error']}", "err")
+            else:
+                self._append_log(f"[满槽删除] {r['name']}", "ok")
+        self._append_log(f"已删除满槽公司 {n_ok} 家。", "ok" if not report["errors"] else "warn")
+        if report["errors"]:
+            messagebox.showerror(
+                "删除未全部完成",
+                f"成功 {n_ok} 家, 失败 {len(report['errors'])} 家:\n"
+                + "\n".join(report["errors"][:8]),
+                parent=self)
+        else:
+            messagebox.showinfo("删除完成", f"已删除 {n_ok} 家满槽公司。", parent=self)
         self.refresh_pool()
 
     def _shown_slots(self):
@@ -642,15 +749,23 @@ class App(tk.Tk):
         skip_parallel = False
         if autocert:
             cap = None
+            bottleneck = ""
             try:
                 ok_c, _, _ = materials.summary()
                 unused_i, _ = institutions.summary()
                 cap = min(ok_c, unused_i)
+                if ok_c < unused_i:
+                    bottleneck = "company"
+                elif unused_i < ok_c:
+                    bottleneck = "inst"
+                self._append_log(
+                    f"资源: 公司槽位 {ok_c} / 机构名 {unused_i} → 可认证 {cap}",
+                    "dim")
             except Exception as e:
                 self._append_log(f"公司资料解析失败({e})", "warn")
                 cap = 0
             if cap is not None and (cap <= 0 or cap < len(targets)):
-                decided = self._ask_when_cert_short(cap, len(targets), confirm)
+                decided = self._ask_when_cert_short(cap, len(targets), confirm, bottleneck)
                 if decided == "cancel":
                     return
                 if decided == "translate":
@@ -705,14 +820,19 @@ class App(tk.Tk):
             self._append_log("已跳过并行执照翻译, 以免和注册抢 OCR/网络", "dim")
 
     def _license_library_count(self) -> int:
-        source = ROOT / "中国执照库"
-        if not source.is_dir():
-            return 0
-        return sum(1 for d in source.iterdir() if d.is_dir())
+        from license_trans.pipeline import license_library_counts
+        pending, stuck = license_library_counts(ROOT / "中国执照库")
+        return pending + stuck
 
-    def _ask_when_cert_short(self, cap: int, n_targets: int, confirm: bool) -> str:
+    def _license_library_status(self) -> tuple[int, int]:
+        from license_trans.pipeline import license_library_counts
+        return license_library_counts(ROOT / "中国执照库")
+
+    def _ask_when_cert_short(self, cap: int, n_targets: int, confirm: bool,
+                             bottleneck: str = "") -> str:
         """缺槽位/机构名时先问要不要翻译执照, 避免和注册绑在一起跑.
 
+        bottleneck: "company"=公司槽位是瓶颈(翻译可补), "inst"=机构名是瓶颈(翻译没用)
         Returns translate / register / cancel.
         """
         if not confirm or self.auto_close:
@@ -725,13 +845,41 @@ class App(tk.Tk):
                     f"可用公司槽位/机构名仅 {cap} 个, 本次只注册前 {cap} 个; "
                     "不并行翻译", "warn")
             return "register"
-        n_lib = self._license_library_count()
+        pending, stuck = self._license_library_status()
+        n_lib = pending + stuck
+        lib_tip = ""
+        if stuck and pending:
+            lib_tip = (
+                f"\n执照库: {pending} 家待翻译, {stuck} 家已译但没搬到资料"
+                "（点「是」会先补搬再翻译）。"
+            )
+        elif stuck:
+            lib_tip = (
+                f"\n执照库有 {stuck} 家已经译好但没搬到资料"
+                "（点「是」会补搬，不必重译）。"
+            )
+        elif pending:
+            lib_tip = f"\n执照库里还有 {pending} 家待翻译。"
+        # 瓶颈提示: 告诉用户缺的是什么, 翻译能不能补
+        if bottleneck == "inst":
+            bottleneck_tip = (
+                "\n⚠ 瓶颈是机构名不足(公司槽位还有富余), "
+                "翻译更多执照也不会增加可认证数, 请先在②区导入更多机构名。"
+            )
+        elif bottleneck == "company":
+            bottleneck_tip = (
+                "\n瓶颈是公司槽位不足(机构名还有富余), "
+                "翻译执照可以补充公司槽位。"
+            )
+        else:
+            bottleneck_tip = ""
         if cap <= 0:
             title = "没有可用公司槽位或机构名"
             head = (
                 "没有可用公司槽位或机构名，做不了企业认证。\n"
                 "（槽位来自「资料」里已译好的执照，机构名在②区导入。）\n\n"
                 "注册和执照翻译一起跑会抢 OCR/网络，验证码也容易超时。"
+                + bottleneck_tip
             )
             no_label = "仍只注册（不认证、不并行翻译）"
         else:
@@ -739,6 +887,7 @@ class App(tk.Tk):
             head = (
                 f"可用公司槽位/机构名仅 {cap} 个，不够本次 {n_targets} 个账号的自动认证。\n\n"
                 "注册和执照翻译一起跑会抢 OCR/网络，验证码也容易超时。"
+                + bottleneck_tip
             )
             no_label = f"只注册并认证前 {cap} 个（不并行翻译）"
         if n_lib <= 0:
@@ -751,9 +900,9 @@ class App(tk.Tk):
         ans = messagebox.askyesnocancel(
             title,
             head
-            + f"\n执照库里还有 {n_lib} 家待翻译。\n\n"
-            "是否先翻译执照、把公司资料补齐？\n\n"
-            "「是」= 只翻译执照，不注册\n"
+            + lib_tip
+            + "\n\n是否先处理执照库、把公司资料补齐？\n\n"
+            "「是」= 只处理执照（补搬+翻译），不注册\n"
             f"「否」= {no_label}\n"
             "「取消」= 返回",
             parent=self,
@@ -871,7 +1020,17 @@ class App(tk.Tk):
             ok, fail = reg.run()
             self.q.put(("done", ok, fail, self.stop_event.is_set()))
         except Exception as e:
+            import traceback
             log(f"引擎异常: {e}", "err")
+            for line in traceback.format_exc().splitlines():
+                log(f"  {line}", "err")
+            self.q.put(("done", 0, total, True))
+        except BaseException as e:
+            # KeyboardInterrupt / SystemExit 等也记录, 避免静默退出
+            import traceback
+            log(f"引擎严重异常({type(e).__name__}): {e}", "err")
+            for line in traceback.format_exc().splitlines():
+                log(f"  {line}", "err")
             self.q.put(("done", 0, total, True))
 
     # ---------- 独立企业认证 ----------
@@ -969,7 +1128,16 @@ class App(tk.Tk):
             ok, fail, skip = cert.run()
             self.q.put(("cert_done", ok, fail, skip, self.stop_event.is_set()))
         except Exception as e:
+            import traceback
             log(f"引擎异常: {e}", "err")
+            for line in traceback.format_exc().splitlines():
+                log(f"  {line}", "err")
+            self.q.put(("cert_done", 0, total, 0, True))
+        except BaseException as e:
+            import traceback
+            log(f"引擎严重异常({type(e).__name__}): {e}", "err")
+            for line in traceback.format_exc().splitlines():
+                log(f"  {line}", "err")
             self.q.put(("cert_done", 0, total, 0, True))
 
     # ---------- 独立设置密码 ----------
@@ -1287,6 +1455,9 @@ class App(tk.Tk):
         self.btn_reset.config(state=st)
         self.btn_archive.config(state=st)
         self.btn_reclaim.config(state=st)
+        self.btn_clean.config(state=st)
+        self.btn_clear_inst.config(state=st)
+        self.btn_del_full.config(state=st)
         self.cmb_count.config(state="disabled" if running else "readonly")
         self.spn_slots.config(state="disabled" if running else "normal")
         self.btn_apply_slots.config(state="disabled" if running else "normal")

@@ -1337,6 +1337,10 @@ class Certifier:
                     self.progress(i - 1, total)
                     email = acc["email"]
                     self.log(f"[{i}/{total}] === {email} ===")
+                    # 心跳: 每10个账号记一次时间戳, 崩溃时可定位最后存活点
+                    if i % 10 == 0:
+                        self.log(f"[heartbeat] 已处理 {i}/{total}, "
+                                 f"成功 {ok} / 失败 {fail} / 跳过 {skip}", "dim")
                     page = context = None
                     try:
                         if self.use_hub:
