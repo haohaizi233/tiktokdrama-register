@@ -43,6 +43,62 @@ def test_recover_ready_folders(tmp_path):
     assert pending.exists()
 
 
+def test_recover_legacy_without_cn_meta_stays(tmp_path):
+    """旧版失败稿也有英文 PDF+身份证, 没有 cn_meta 不能当成功补搬."""
+    src = tmp_path / "中国执照库"
+    dest = tmp_path / "资料"
+    src.mkdir()
+    dest.mkdir()
+    ready = src / "旧失败"
+    ready.mkdir()
+    _touch(ready, "执照英文版.pdf")
+    _touch(ready, "photo-正面.jpg")
+    _touch(ready, "photo-反面.jpg")
+    n = pipeline._recover_ready_folders(src, dest)
+    assert n == 0
+    assert ready.exists()
+
+
+def test_recover_legacy_dual_pdf_keeps_both_without_named_meta(tmp_path):
+    src = tmp_path / "中国执照库"
+    dest = tmp_path / "资料"
+    src.mkdir()
+    dest.mkdir()
+    ready = src / "旧双份"
+    ready.mkdir()
+    (ready / "cn_meta.json").write_text(
+        '{"name_zh":"旧双份"}', encoding="utf-8")
+    _touch(ready, "a英文版.pdf")
+    _touch(ready, "b英文版.pdf")
+    _touch(ready, "id-正面.jpg")
+    _touch(ready, "id-反面.jpg")
+    n = pipeline._recover_ready_folders(src, dest)
+    assert n == 1
+    moved = dest / "旧双份"
+    assert (moved / "a英文版.pdf").exists()
+    assert (moved / "b英文版.pdf").exists()
+
+
+def test_recover_purges_extra_en_pdf(tmp_path):
+    src = tmp_path / "中国执照库"
+    dest = tmp_path / "资料"
+    src.mkdir()
+    dest.mkdir()
+    ready = src / "已译公司"
+    ready.mkdir()
+    (ready / "cn_meta.json").write_text(
+        '{"license_pdf":"good英文版.pdf"}', encoding="utf-8")
+    _touch(ready, "good英文版.pdf")
+    _touch(ready, "fail英文版.pdf")
+    _touch(ready, "id-正面.jpg")
+    _touch(ready, "id-反面.jpg")
+    n = pipeline._recover_ready_folders(src, dest)
+    assert n == 1
+    moved = dest / "已译公司"
+    assert (moved / "good英文版.pdf").exists()
+    assert not (moved / "fail英文版.pdf").exists()
+
+
 def test_license_library_counts(tmp_path):
     src = tmp_path / "中国执照库"
     src.mkdir()
