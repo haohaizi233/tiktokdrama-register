@@ -66,3 +66,38 @@ def test_expand_opens_new_slots(slot_env):
     left = materials.mark_usage("Acme", "new@x.com", "assigned")
     assert left == 1
     assert len(materials.load_usage()["Acme"]) == 6
+
+
+def test_full_slot_companies_and_delete(slot_env, tmp_path):
+    folder = tmp_path / "满槽公司"
+    folder.mkdir()
+    (folder / "shot英文版.pdf").write_bytes(b"%PDF")
+    (folder / "id-正面.jpg").write_bytes(b"f")
+    (folder / "id-反面.jpg").write_bytes(b"b")
+    (folder / "cn_meta.json").write_text("{}", encoding="utf-8")
+    materials.save_usage(_five_slots("满槽公司"))
+    materials.set_company_slots(5)
+    got = materials.full_slot_companies()
+    assert any(t["name"] == "满槽公司" for t in got)
+    report = materials.delete_full_slot_companies(["满槽公司"])
+    assert any(r["name"] == "满槽公司" and not r.get("error") for r in report["deleted"])
+    assert not folder.exists()
+    assert "满槽公司" not in materials.load_usage()
+
+
+def test_clear_used_institutions(tmp_path, monkeypatch):
+    import institutions
+    path = tmp_path / "institutions.json"
+    monkeypatch.setattr(institutions, "INST_FILE", path)
+    path.write_text(
+        '[{"name":"Keep Me","status":"unused","email":null},'
+        '{"name":"Used","status":"submitted","email":"a@x.com"},'
+        '{"name":"Dup","status":"discarded","email":null},'
+        '{"name":"Open","status":"failed","email":"b@x.com"}]',
+        encoding="utf-8",
+    )
+    used = institutions.used_items()
+    assert {it["name"] for it in used} == {"Used", "Dup"}
+    assert institutions.clear_used() == 2
+    left = {it["name"] for it in institutions._load()}
+    assert left == {"Keep Me", "Open"}

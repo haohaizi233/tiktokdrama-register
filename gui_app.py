@@ -78,6 +78,7 @@ class App(tk.Tk):
         self._login_handle = None  # 驻留中的浏览器 (playwright, browser)
         self.auto_close = auto_close
         self._log_buffer: list[str] = []
+        self._res_after = None
         self._build_style()
         self._build_ui()
         self.refresh_pool()
@@ -290,11 +291,13 @@ class App(tk.Tk):
         self.cmb_count.current(0)
         self.cmb_count.pack(side="left", padx=(4, 14))
         # 默认5; 政策可变所以允许改, 必须点「应用」并确认(尤其缩小)
+        # StringVar 避免 Windows ttk.Spinbox 刚创建时显示 from_(1) 而不是已生效值
         ttk.Label(bar4, text="每企业认证账号数:").pack(side="left")
+        self.var_slots = tk.StringVar(value=str(materials.get_company_slots()))
         self.spn_slots = ttk.Spinbox(
             bar4, from_=materials.MIN_COMPANY_SLOTS,
-            to=materials.MAX_COMPANY_SLOTS, width=3)
-        self.spn_slots.set(materials.get_company_slots())
+            to=materials.MAX_COMPANY_SLOTS, width=3,
+            textvariable=self.var_slots)
         self.spn_slots.pack(side="left", padx=(4, 4))
         self.btn_apply_slots = ttk.Button(
             bar4, text="应用", width=4, command=self._apply_company_slots)
@@ -392,7 +395,14 @@ class App(tk.Tk):
             messagebox.showinfo("导入完成", "这些机构名库中已存在, 全部跳过。", parent=self)
 
     # ---------- 号池 ----------
-    def refresh_pool(self):
+    def refresh_pool(self, *, resources: bool = True):
+        self._refresh_pool_table()
+        if resources:
+            self._refresh_resource_labels()
+        else:
+            self._schedule_resource_refresh()
+
+    def _refresh_pool_table(self):
         accounts = pool.all_accounts()
         stats = {"unused": 0, "registered": 0, "failed": 0}
         self.tree.delete(*self.tree.get_children())
@@ -413,6 +423,17 @@ class App(tk.Tk):
         self.lbl_pool.config(
             text=f"总数 {len(accounts)}    可用 {stats['unused']}    "
                  f"已注册 {stats['registered']}    失败 {stats['failed']}")
+
+    def _schedule_resource_refresh(self):
+        if self._res_after is not None:
+            try:
+                self.after_cancel(self._res_after)
+            except Exception:
+                pass
+        self._res_after = self.after(400, self._refresh_resource_labels)
+
+    def _refresh_resource_labels(self):
+        self._res_after = None
         try:
             ok_c, used_c, _ = materials.summary()
             self.lbl_mat.config(text=f"公司槽位: 可用 {ok_c} / 已用 {used_c}")
@@ -664,6 +685,54 @@ class App(tk.Tk):
             messagebox.showinfo("删除完成", f"已删除 {n_ok} 家满槽公司。", parent=self)
         self.refresh_pool()
 
+    def _busy_now(self) -> bool:
+        if self.worker and self.worker.is_alive():
+            messagebox.showinfo(
+                "任务进行中", "当前已有任务在跑，请先点「停止」或等它结束。", parent=self)
+            return True
+        return False
+
+    def _action_dialog(self, title: str, message: str, primary: str,
+                       secondary: str, primary_value: str,
+                       secondary_value: str) -> str:
+        """三选一对话框。回车走主按钮(开始注册), Esc/关闭=取消。"""
+        win = tk.Toplevel(self)
+        win.title(title)
+        win.transient(self)
+        win.resizable(False, False)
+        result = ["cancel"]
+
+        ttk.Label(win, text=message, wraplength=520, justify="left").pack(
+            padx=18, pady=(16, 10))
+        bar = ttk.Frame(win)
+        bar.pack(fill="x", padx=18, pady=(0, 14))
+
+        def choose(v):
+            result[0] = v
+            win.destroy()
+
+        ttk.Button(bar, text="取消", command=lambda: choose("cancel")).pack(
+            side="right")
+        ttk.Button(
+            bar, text=secondary, command=lambda: choose(secondary_value)
+        ).pack(side="right", padx=(0, 8))
+        btn_primary = ttk.Button(
+            bar, text=primary, command=lambda: choose(primary_value))
+        btn_primary.pack(side="right", padx=(0, 8))
+        win.bind("<Return>", lambda _e: choose(primary_value))
+        win.bind("<Escape>", lambda _e: choose("cancel"))
+        win.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
+        win.update_idletasks()
+        x = self.winfo_rootx() + max(
+            (self.winfo_width() - win.winfo_reqwidth()) // 2, 0)
+        y = self.winfo_rooty() + max(
+            (self.winfo_height() - win.winfo_reqheight()) // 3, 0)
+        win.geometry(f"+{x}+{y}")
+        btn_primary.focus_set()
+        win.grab_set()
+        win.wait_window()
+        return result[0]
+
     def _shown_slots(self):
         try:
             return int(str(self.spn_slots.get()).strip())
@@ -671,7 +740,7 @@ class App(tk.Tk):
             return None
 
     def _slots_applied(self) -> bool:
-        """Start is blocked until the spinbox matches the persisted cap."""
+        """Spinner 和已生效槽位数不一致时, 问清后按生效值继续, 避免点了注册却直接返回。"""
         shown = self._shown_slots()
         cur = materials.get_company_slots()
         if shown is None:
@@ -679,12 +748,16 @@ class App(tk.Tk):
             return True
         shown = materials._clamp_slots(shown)
         if shown != cur:
-            messagebox.showwarning(
-                "槽位数未应用",
-                f"界面显示 {shown}，但当前生效的是 {cur}。\n"
-                "请先点「应用」（会有慎重提醒），或改回后再开始。",
-                parent=self)
-            return False
+            if not messagebox.askyesno(
+                    "槽位数未应用",
+                    f"界面显示 {shown}，但还没点「应用」，当前生效仍是 {cur}。\n\n"
+                    f"按生效的 {cur} 继续注册？\n"
+                    "点「否」可回去先点「应用」。",
+                    parent=self):
+                return False
+            self.spn_slots.set(cur)
+            self._append_log(
+                f"每企业认证账号数未点应用, 本次按已生效的 {cur} 继续", "warn")
         return True
 
     def _apply_company_slots(self):
@@ -731,25 +804,55 @@ class App(tk.Tk):
 
     # ---------- 注册 ----------
     def start_register(self, confirm: bool = True):
-        if self.worker and self.worker.is_alive():
+        try:
+            self._start_register(confirm)
+        except Exception:
+            import traceback
+            tb = traceback.format_exc()
+            self._append_log(f"开始注册异常:\n{tb}", "err")
+            if not self.auto_close:
+                messagebox.showerror(
+                    "开始注册失败", tb[-800:], parent=self)
+            if not (self.worker and self.worker.is_alive()):
+                self._set_running(False)
+
+    def _start_register(self, confirm: bool = True):
+        if self._busy_now():
             return
         if not self._slots_applied():
+            self._append_log("开始注册已取消: 每企业认证账号数未应用", "warn")
             return
-        unused = [a for a in pool.all_accounts() if a.get("status") == "unused"]
+        accounts = pool.all_accounts()
+        unused = [a for a in accounts if a.get("status") == "unused"]
         if not unused:
+            n_fail = sum(1 for a in accounts if a.get("status") == "failed")
+            n_reg = sum(1 for a in accounts if a.get("status") == "registered")
+            why = f"号池中没有可用账号(已注册 {n_reg}, 失败 {n_fail}, 合计 {len(accounts)})。"
+            if n_fail:
+                why += " 失败号请先点「重置失败」。"
+            self._append_log(why, "warn")
             if self.auto_close:
-                self._append_log("号池中没有可用账号, 自动退出。", "warn")
                 self.after(300, self.destroy)
             else:
-                messagebox.showwarning("提示", "号池中没有可用账号, 请先在①区导入。", parent=self)
+                messagebox.showwarning("提示", why + "\n请先在①区导入, 或重置失败账号。", parent=self)
             return
-        sel = self.cmb_count.get()
-        targets = unused if sel == "max" else unused[: int(sel)]
+        sel = (self.cmb_count.get() or "1").strip()
+        if sel == "max":
+            targets = unused
+        else:
+            try:
+                n = max(1, int(sel))
+            except ValueError:
+                n = 1
+            targets = unused[:n]
         autocert = self.chk_autocert.get()
         skip_parallel = False
         if autocert:
             cap = None
             bottleneck = ""
+            self._append_log("正在检查公司槽位 / 机构名…", "dim")
+            self.config(cursor="watch")
+            self.update_idletasks()
             try:
                 ok_c, _, _ = materials.summary()
                 unused_i, _ = institutions.summary()
@@ -764,23 +867,30 @@ class App(tk.Tk):
             except Exception as e:
                 self._append_log(f"公司资料解析失败({e})", "warn")
                 cap = 0
+            finally:
+                self.config(cursor="")
             if cap is not None and (cap <= 0 or cap < len(targets)):
-                decided = self._ask_when_cert_short(cap, len(targets), confirm, bottleneck)
-                if decided == "cancel":
-                    return
-                if decided == "translate":
-                    self._start_license_scan_instead_of_register()
-                    return
-                skip_parallel = True
-                if cap <= 0:
+                # max 很容易超过可认证数; 有槽位时直接按 cap 注册, 不再弹
+                # 「是=只翻译」把开始注册点没。槽位为 0 才问要不要先译执照。
+                if cap > 0:
+                    skip_parallel = True
+                    self._append_log(
+                        f"可用公司槽位/机构名仅 {cap} 个, 少于本次 {len(targets)} 个, "
+                        f"本次只注册并认证前 {cap} 个 (不并行翻译执照)", "warn")
+                    targets = targets[:cap]
+                else:
+                    decided = self._ask_when_cert_short(
+                        cap, len(targets), confirm, bottleneck)
+                    if decided == "cancel":
+                        self._append_log("开始注册已取消", "dim")
+                        return
+                    if decided == "translate":
+                        self._start_license_scan_instead_of_register()
+                        return
+                    skip_parallel = True
                     autocert = False
                     self._append_log(
                         "没有可用公司槽位或机构名, 本次只注册、不认证、不并行翻译", "warn")
-                else:
-                    self._append_log(
-                        f"可用公司槽位/机构名仅 {cap} 个, 本次只注册前 {cap} 个账号"
-                        " (不并行翻译执照)", "warn")
-                    targets = targets[:cap]
         preview = "\n".join(a["email"] for a in targets[:5])
         if len(targets) > 5:
             preview += f"\n… 等共 {len(targets)} 个"
@@ -794,6 +904,7 @@ class App(tk.Tk):
                 f"本次将依次注册 {len(targets)} 个账号:\n\n{preview}\n\n"
                 f"预计每个耗时1~3分钟, 浏览器会自动弹出并完成操作。{cert_tip}{pwd_tip}\n确定开始?",
                 parent=self):
+            self._append_log("开始注册已取消(未确认)", "dim")
             return
         self.stop_event = threading.Event()
         self._set_running(True)
@@ -851,12 +962,12 @@ class App(tk.Tk):
         if stuck and pending:
             lib_tip = (
                 f"\n执照库: {pending} 家待翻译, {stuck} 家已译但没搬到资料"
-                "（点「是」会先补搬再翻译）。"
+                "（点「先处理执照」会先补搬再翻译）。"
             )
         elif stuck:
             lib_tip = (
                 f"\n执照库有 {stuck} 家已经译好但没搬到资料"
-                "（点「是」会补搬，不必重译）。"
+                "（点「先处理执照」会补搬，不必重译）。"
             )
         elif pending:
             lib_tip = f"\n执照库里还有 {pending} 家待翻译。"
@@ -897,21 +1008,17 @@ class App(tk.Tk):
                     parent=self):
                 return "cancel"
             return "register"
-        ans = messagebox.askyesnocancel(
+        return self._action_dialog(
             title,
             head
             + lib_tip
-            + "\n\n是否先处理执照库、把公司资料补齐？\n\n"
-            "「是」= 只处理执照（补搬+翻译），不注册\n"
-            f"「否」= {no_label}\n"
-            "「取消」= 返回",
-            parent=self,
+            + "\n\n点「开始注册」才会注册；「先处理执照」只补搬/翻译，不注册。\n\n"
+            f"开始注册 = {no_label}",
+            primary="开始注册",
+            secondary="先处理执照（不注册）",
+            primary_value="register",
+            secondary_value="translate",
         )
-        if ans is True:
-            return "translate"
-        if ans is False:
-            return "register"
-        return "cancel"
 
     def _start_license_scan_instead_of_register(self):
         n_lib = self._license_library_count()
@@ -997,6 +1104,7 @@ class App(tk.Tk):
             self.q.put(("progress", done, tot))
 
         def after_register(page, email, shoot=None):
+            self.q.put(("pool",))
             log(f"--- 注册后附加任务(企业认证+设置密码): {email} ---")
             password_setter.after_register_tasks(
                 page, email, log=log, stop_event=self.stop_event,
@@ -1035,7 +1143,7 @@ class App(tk.Tk):
 
     # ---------- 独立企业认证 ----------
     def start_certify(self, confirm: bool = True):
-        if self.worker and self.worker.is_alive():
+        if self._busy_now():
             return
         if not self._slots_applied():
             return
@@ -1142,7 +1250,7 @@ class App(tk.Tk):
 
     # ---------- 独立设置密码 ----------
     def start_pwd(self, confirm: bool = True):
-        if self.worker and self.worker.is_alive():
+        if self._busy_now():
             return
         accounts = pool.all_accounts()
         targets = [a for a in accounts
@@ -1216,7 +1324,7 @@ class App(tk.Tk):
         绑定创建线程, 清理必须回原线程), 下次登录其他账号或退出GUI时释放。
         不消耗新账号(验证码重登只耗一封邮件)。
         """
-        if self.worker and self.worker.is_alive():
+        if self._busy_now():
             return
         if self._login_state == "running":
             return
@@ -1344,7 +1452,7 @@ class App(tk.Tk):
 
     # ---------- 事件循环 ----------
     def _drain(self):
-        MAX_PER_TICK = 10
+        MAX_PER_TICK = 20
         processed = 0
         try:
             while processed < MAX_PER_TICK:
@@ -1357,7 +1465,7 @@ class App(tk.Tk):
                     self.progress.config(maximum=tot, value=done)
                     self.lbl_progress.config(text=f"进度: {done}/{tot}")
                 elif kind == "pool":
-                    self.refresh_pool()
+                    self.refresh_pool(resources=False)
                 elif kind == "done":
                     _, ok, fail, stopped = msg
                     self._set_running(False)
@@ -1434,6 +1542,12 @@ class App(tk.Tk):
                 processed += 1
         except queue.Empty:
             pass
+        except Exception:
+            import traceback
+            try:
+                self._append_log(f"界面刷新异常:\n{traceback.format_exc()}", "err")
+            except Exception:
+                pass
 
         # Batch flush log buffer to file (one write per tick)
         if self._log_buffer:

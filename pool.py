@@ -18,8 +18,19 @@ LEGACY_ACCOUNTS = ROOT / "accounts.json"
 SEP = "----"
 # 严格邮箱正则: 只允许常见邮箱字符, 排除引号/逗号/分号等标点
 EMAIL_RE = re.compile(r"^[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$")
-# 导入时需要剥离的包裹字符(引号/逗号/分号/空格等)
-_STRIP_CHARS = "\"' \t\r\n,;，；"
+# 导入时需要剥离的包裹字符(ASCII/中文/弯引号、逗号/分号/空格等)
+_STRIP_CHARS = "\"' \t\r\n,;，；“”‘’＂＇「」『』"
+
+
+def norm_email(value) -> str:
+    """剥离首尾包裹标点后的邮箱。号池/用量/机构名比对都走这一份。"""
+    if value is None:
+        return ""
+    return str(value).strip(_STRIP_CHARS)
+
+
+def emails_match(a, b) -> bool:
+    return bool(norm_email(a)) and norm_email(a) == norm_email(b)
 
 def ensure_dirs() -> None:
     for d in (POOL_DIR, AUTH_DIR, LOG_DIR):
@@ -78,14 +89,17 @@ def all_accounts() -> list[dict]:
     merged: dict[str, dict] = {}
     for f in _pool_files():
         data = _read_json(f)
-        if not data:
+        if not isinstance(data, dict):
             continue
         for a in data.get("accounts", []):
             if isinstance(a, dict) and a.get("email"):
-                email = a["email"].strip(_STRIP_CHARS)
+                email = norm_email(a["email"])
                 if not EMAIL_RE.match(email):
                     continue  # 脏数据(含引号等)直接跳过
-                a["email"] = email  # 原地修正
+                a = dict(a)
+                a["email"] = email
+                if not a.get("status"):
+                    a["status"] = "unused"
                 merged[email] = a
     return sorted(merged.values(), key=lambda a: a.get("index", 0))
 
@@ -96,7 +110,7 @@ def scan_dirty() -> tuple[list[str], list[str]]:
     seen = set()
     for f in _pool_files():
         data = _read_json(f)
-        if not data:
+        if not isinstance(data, dict):
             continue
         for a in data.get("accounts", []):
             if not isinstance(a, dict) or not a.get("email"):
@@ -105,7 +119,7 @@ def scan_dirty() -> tuple[list[str], list[str]]:
             if raw in seen:
                 continue
             seen.add(raw)
-            clean = raw.strip(_STRIP_CHARS)
+            clean = norm_email(raw)
             if EMAIL_RE.match(clean):
                 if clean != raw:
                     fixable.append(raw)
@@ -122,7 +136,7 @@ def clean_pool() -> tuple[int, int]:
     fixed, dropped = 0, 0
     for f in _pool_files():
         data = _read_json(f)
-        if not data:
+        if not isinstance(data, dict):
             continue
         changed = False
         kept = []
@@ -130,7 +144,7 @@ def clean_pool() -> tuple[int, int]:
             if not isinstance(a, dict) or not a.get("email"):
                 continue
             raw_email = a["email"]
-            clean = raw_email.strip(_STRIP_CHARS)
+            clean = norm_email(raw_email)
             if not EMAIL_RE.match(clean):
                 dropped += 1
                 changed = True
@@ -143,7 +157,41 @@ def clean_pool() -> tuple[int, int]:
         if changed:
             data["accounts"] = kept
             _write_json(f, data)
+    _relink_bound_emails()
     return fixed, dropped
+
+
+def _relink_bound_emails() -> None:
+    """清洗号池后, 把 usage.json / institutions.json 里带引号的邮箱一并改成干净地址。"""
+    try:
+        import materials
+        usage = materials.load_usage()
+        changed = False
+        for slots in usage.values():
+            for s in slots:
+                raw = s.get("email") or ""
+                clean = norm_email(raw)
+                if clean and clean != raw:
+                    s["email"] = clean
+                    changed = True
+        if changed:
+            materials.save_usage(usage)
+    except Exception:
+        pass
+    try:
+        import institutions
+        items = institutions._load()
+        changed = False
+        for it in items:
+            raw = it.get("email") or ""
+            clean = norm_email(raw)
+            if clean and clean != raw:
+                it["email"] = clean
+                changed = True
+        if changed:
+            institutions._save(items)
+    except Exception:
+        pass
 
 def import_text(text: str, source_name: str = "粘贴内容") -> tuple[int, int, list[str]]:
     """导入账号文本 → 新增部分保存为新json. 返回 (新增数, 重复跳过数, 异常行列表)"""
@@ -168,14 +216,18 @@ def import_text(text: str, source_name: str = "粘贴内容") -> tuple[int, int,
     return len(new), len(parsed) - len(new), bad
 
 def update_account(email: str, **fields) -> None:
-    """把字段更新写入所有包含该邮箱的json"""
+    """把字段更新写入所有包含该邮箱的json(按剥离引号后的地址匹配, 并写回干净邮箱)。"""
+    email = norm_email(email)
+    if not email:
+        return
     for f in _pool_files():
         data = _read_json(f)
         if not data:
             continue
         changed = False
         for a in data.get("accounts", []):
-            if a.get("email") == email:
+            if emails_match(a.get("email"), email):
+                a["email"] = email
                 a.update(fields)
                 changed = True
         if changed:
