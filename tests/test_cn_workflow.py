@@ -26,7 +26,7 @@ def test_cn_folder_profile_uses_english_license_for_aog_and_cp(tmp_path, monkeyp
     (folder / "id-反面.jpg").write_bytes(b"b")
     (folder / "cn_meta.json").write_text(
         '{"name_zh":"株洲市浩航商贸有限公司","name_en":"Zhuzhou Haohang Trading Co., Ltd.",'
-        '"credit_code":"91430211MA7MWFUJ1U"}',
+        '"credit_code":"91430211MA7MWFUJ1U","license_pdf":"shot英文版.pdf"}',
         encoding="utf-8",
     )
     profiles = materials.cn_folder_profiles()
@@ -38,6 +38,124 @@ def test_cn_folder_profile_uses_english_license_for_aog_and_cp(tmp_path, monkeyp
     assert p["cp575"] == p["biz_proof"]
     assert p["name_zh"] == "株洲市浩航商贸有限公司"
     assert p["reg_no"] == "91430211MA7MWFUJ1U"
+
+
+def test_dual_en_pdf_uses_cn_meta_name_and_deletes_extra(tmp_path, monkeypatch):
+    """失败稿 + 成功稿并存时, 只用 cn_meta 记名的那份(读档案不删文件)。"""
+    monkeypatch.setattr(materials, "MATERIALS_DIR", tmp_path)
+    folder = tmp_path / "某公司"
+    folder.mkdir()
+    good = folder / "good英文版.pdf"
+    bad = folder / "fail英文版.pdf"
+    good.write_bytes(b"%PDF-good")
+    bad.write_bytes(b"%PDF-fail")
+    (folder / "id-正面.jpg").write_bytes(b"f")
+    (folder / "id-反面.jpg").write_bytes(b"b")
+    (folder / "cn_meta.json").write_text(
+        '{"license_pdf":"good英文版.pdf"}', encoding="utf-8")
+    p = materials.cn_folder_profiles()[0]
+    assert p["biz_proof"].name == "good英文版.pdf"
+    assert good.exists()
+    assert bad.exists()
+
+
+def test_dual_en_pdf_no_fallback_if_named_missing(tmp_path, monkeypatch):
+    """记名稿不在时回落到目录里剩下的英文版(旧版改名/缺字段兼容)."""
+    monkeypatch.setattr(materials, "MATERIALS_DIR", tmp_path)
+    folder = tmp_path / "某公司"
+    folder.mkdir()
+    leftover = folder / "fail英文版.pdf"
+    leftover.write_bytes(b"%PDF-fail")
+    (folder / "id-正面.jpg").write_bytes(b"f")
+    (folder / "id-反面.jpg").write_bytes(b"b")
+    (folder / "cn_meta.json").write_text(
+        '{"license_pdf":"good英文版.pdf"}', encoding="utf-8")
+    p = materials.cn_folder_profiles()[0]
+    assert p["biz_proof"].name == "fail英文版.pdf"
+    assert leftover.exists()
+
+
+def test_screenshot_layout_success_in_materials(tmp_path, monkeypatch):
+    """截图那种目录: 原图 + id-正面/反面 + stem英文版.pdf + cn_meta, 已译成功."""
+    monkeypatch.setattr(materials, "MATERIALS_DIR", tmp_path)
+    folder = tmp_path / "0宝鸡金迪康机械加工有限公司张云龙"
+    folder.mkdir()
+    (folder / "6888a5b0350b046a24084ab3869490e.png").write_bytes(b"idraw")
+    (folder / "id-正面.png").write_bytes(b"front")
+    (folder / "id-反面.png").write_bytes(b"back")
+    (folder / "mmexport1731117591352.jpg").write_bytes(b"lic")
+    pdf = folder / "mmexport1731117591352英文版.pdf"
+    pdf.write_bytes(b"%PDF")
+    (folder / "cn_meta.json").write_text(
+        '{"name_zh":"宝鸡金迪康机械加工有限公司",'
+        '"license_pdf":"mmexport1731117591352英文版.pdf",'
+        '"credit_code":"91610302MA7XXXXX1X"}',
+        encoding="utf-8",
+    )
+    p = materials.cn_folder_profiles()[0]
+    assert p["complete"] is True
+    assert p["biz_proof"].name == "mmexport1731117591352英文版.pdf"
+    assert p["id_front"].name == "id-正面.png"
+    assert p["id_back"].name == "id-反面.png"
+    assert (folder / "6888a5b0350b046a24084ab3869490e.png").exists()
+
+
+def test_legacy_arbitration_fail_not_treated_as_success(tmp_path):
+    """旧版仲裁没过也会留下英文 PDF + 身份证, 没有 cn_meta, 不能当成功稿."""
+    from license_trans import pipeline
+    folder = tmp_path / "仲裁没过公司"
+    folder.mkdir()
+    (folder / "shot英文版.pdf").write_bytes(b"%PDF-fail")
+    (folder / "id-正面.png").write_bytes(b"f")
+    (folder / "id-反面.png").write_bytes(b"b")
+    (folder / "mmexport1.jpg").write_bytes(b"raw")
+    assert pipeline._folder_ready_to_move(folder) is False
+    assert pipeline._has_id_pair(folder) is True
+    assert pipeline._en_pdf_paths(folder)
+
+
+def test_legacy_folder_without_cn_meta_still_usable(tmp_path, monkeypatch):
+    """已经进资料/的旧文件夹: 只有英文版 PDF + 身份证, 没有 cn_meta 也能认证."""
+    monkeypatch.setattr(materials, "MATERIALS_DIR", tmp_path)
+    folder = tmp_path / "旧版公司"
+    folder.mkdir()
+    pdf = folder / "执照英文版.pdf"
+    pdf.write_bytes(b"%PDF")
+    (folder / "id-正面.jpg").write_bytes(b"f")
+    (folder / "id-反面.jpg").write_bytes(b"b")
+    p = materials.cn_folder_profiles()[0]
+    assert p["complete"] is True
+    assert p["biz_proof"].name == "执照英文版.pdf"
+
+
+def test_legacy_suffix_id_names_still_usable(tmp_path, monkeypatch):
+    monkeypatch.setattr(materials, "MATERIALS_DIR", tmp_path)
+    folder = tmp_path / "旧命名公司"
+    folder.mkdir()
+    (folder / "shot英文版.pdf").write_bytes(b"%PDF")
+    (folder / "a-正面.jpg").write_bytes(b"f")
+    (folder / "b-反面.jpg").write_bytes(b"b")
+    p = materials.cn_folder_profiles()[0]
+    assert p["complete"] is True
+    assert p["id_front"].name == "a-正面.jpg"
+    assert p["id_back"].name == "b-反面.jpg"
+
+
+def test_legacy_dual_pdf_without_license_pdf_keeps_both(tmp_path, monkeypatch):
+    """旧版没有记名时不删多出来的英文版, 避免误删成功稿."""
+    monkeypatch.setattr(materials, "MATERIALS_DIR", tmp_path)
+    folder = tmp_path / "某公司"
+    folder.mkdir()
+    a = folder / "a英文版.pdf"
+    b = folder / "b英文版.pdf"
+    a.write_bytes(b"%PDF-a")
+    b.write_bytes(b"%PDF-b")
+    (folder / "id-正面.jpg").write_bytes(b"f")
+    (folder / "id-反面.jpg").write_bytes(b"b")
+    p = materials.cn_folder_profiles()[0]
+    assert p["biz_proof"] is not None
+    assert a.exists() and b.exists()
+
 
 
 def test_cn_folder_incomplete_without_ids(tmp_path, monkeypatch):

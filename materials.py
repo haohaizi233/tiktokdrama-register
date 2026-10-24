@@ -125,22 +125,33 @@ def _match_cp575(files: list[Path]) -> Path | None:
 
 
 def _match_en_license_pdf(files: list[Path], preferred: str = "") -> Path | None:
-    """Pick the English-license PDF: cn_meta 记名优先, 否则取最新修改的一份.
+    """选用英译 PDF, 兼容旧版资料.
 
-    旧逻辑按 iterdir 顺序取第一份, 仲裁失败稿和二次成功稿并存时会抽卡。
+    新版 cn_meta.license_pdf 对得上 → 用它。
+    读档案时不删文件(GUI 刷新会扫全部资料夹, 删文件会卡住界面)。
+    多余失败稿由执照库翻译成功/补搬时清掉。
+    记名对不上 / 旧版没有记名 → 回落到仅有的一份或最新一份,
+    保证上一版已经译好的资料仍能认证.
     """
     pdfs = [f for f in files
             if f.is_file() and "英文版" in f.name and f.suffix.lower() == ".pdf"]
     if not pdfs:
         return None
+    keep = None
     if preferred:
         for f in pdfs:
             if f.name == preferred:
-                return f
-    try:
-        return max(pdfs, key=lambda p: p.stat().st_mtime)
-    except OSError:
-        return pdfs[0]
+                keep = f
+                break
+    if keep is None:
+        if len(pdfs) == 1:
+            keep = pdfs[0]
+        else:
+            try:
+                keep = max(pdfs, key=lambda p: p.stat().st_mtime)
+            except OSError:
+                keep = pdfs[0]
+    return keep
 
 
 def _pick_named_id(files: list[Path], side: str) -> Path | None:
@@ -277,6 +288,9 @@ def _profile_from_folder(folder: Path, row: dict | None = None, *, workflow: str
         if en_pdf:
             p["biz_proof"] = en_pdf
             p["cp575"] = en_pdf
+        elif p["biz_proof"] and "英文版" in Path(p["biz_proof"]).name:
+            # 旧版没有 license_pdf 字段, 或记名文件改过名: 沿用目录里已有的英文版
+            p["cp575"] = p["cp575"] or p["biz_proof"]
         elif p["biz_proof"] and not p["cp575"]:
             p["cp575"] = p["biz_proof"]
         for k in ("biz_proof", "id_front", "id_back"):
@@ -380,6 +394,16 @@ _OPEN_SLOT = ("assigned", "failed")  # 未终态: 崩溃残留 / 提交未确认
 
 class SlotFullError(RuntimeError):
     """写入新槽位时该公司已满(同邮箱更新不走这条)"""
+
+
+def _clean_email(email) -> str:
+    from pool import norm_email
+    return norm_email(email)
+
+
+def _email_eq(stored, email) -> bool:
+    from pool import emails_match
+    return emails_match(stored, email)
 
 
 def _slots_file() -> Path:
@@ -513,8 +537,10 @@ def mark_usage(company: str, email: str, status: str, note: str = "") -> int:
     """
     usage = load_usage()
     slots = usage.setdefault(company, [])
+    email = _clean_email(email)
     for s in slots:
-        if s.get("email") == email:
+        if _email_eq(s.get("email"), email):
+            s["email"] = email
             s.update(status=status,
                      at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                      note=note or s.get("note", ""))
@@ -539,8 +565,9 @@ def release_usage(company: str, email: str) -> bool:
     """
     usage = load_usage()
     slots = usage.get(company) or []
+    email = _clean_email(email)
     for s in slots:
-        if s.get("email") == email and s.get("status") != "submitted":
+        if _email_eq(s.get("email"), email) and s.get("status") != "submitted":
             slots.remove(s)
             if not slots:
                 usage.pop(company, None)
@@ -567,10 +594,11 @@ def pick_company() -> dict | None:
 def find_open_slot(email: str, usage: dict | None = None) -> tuple[str, dict] | None:
     """该邮箱的未终态槽位(assigned/failed)。多条时取最近一条, submitted 不计。"""
     usage = load_usage() if usage is None else usage
+    email = _clean_email(email)
     found: list[tuple[str, dict]] = []
     for company, slots in usage.items():
         for s in slots:
-            if s.get("email") == email and s.get("status") in _OPEN_SLOT:
+            if _email_eq(s.get("email"), email) and s.get("status") in _OPEN_SLOT:
                 found.append((company, s))
     if not found:
         return None
@@ -619,12 +647,13 @@ def drop_extra_open_slots(email: str, keep_company: str) -> list[str]:
     usage = load_usage()
     dropped: list[str] = []
     changed = False
+    email = _clean_email(email)
     for company, slots in list(usage.items()):
         if company == keep_company:
             continue
         kept = []
         for s in slots:
-            if s.get("email") == email and s.get("status") in _OPEN_SLOT:
+            if _email_eq(s.get("email"), email) and s.get("status") in _OPEN_SLOT:
                 dropped.append(company)
                 changed = True
             else:

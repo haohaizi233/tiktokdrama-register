@@ -1120,18 +1120,18 @@ def certify_account(page, email: str, *, log=None, stop_event=None, shoot=None) 
             # 新分配但平台已有认证: 退回新库存, 尽量对齐号池里记下的旧绑定
             materials.release_usage(company, email)
             institutions.release(final_inst)
-            acc = next((a for a in pool.all_accounts() if a["email"] == email), {})
+            acc = next((a for a in pool.all_accounts() if pool.emails_match(a["email"], email)), {})
             prev = acc.get("cert_company")
             prev_inst = acc.get("institution")
             if prev:
                 usage = materials.load_usage()
                 for s in usage.get(prev) or []:
-                    if s.get("email") == email and s.get("status") != "submitted":
+                    if pool.emails_match(s.get("email"), email) and s.get("status") != "submitted":
                         s.update(status="submitted", at=now, note=note)
                 materials.save_usage(usage)
             if prev_inst:
                 ent = institutions.find(prev_inst)
-                if ent and ent.get("email") == email and ent.get("status") != "submitted":
+                if ent and pool.emails_match(ent.get("email"), email) and ent.get("status") != "submitted":
                     institutions.mark(prev_inst, email, "submitted", note=note)
             pool.update_account(email, cert_status="submitted", cert_company=prev,
                                 institution=inst_page or prev_inst, cert_at=now,

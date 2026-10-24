@@ -105,10 +105,21 @@ def count_overlong() -> int:
     return sum(1 for it in _load() if len(it["name"]) > MAX_LEN)
 
 
+def _email_eq(stored, email) -> bool:
+    from pool import emails_match
+    return emails_match(stored, email)
+
+
+def _clean_email(email) -> str:
+    from pool import norm_email
+    return norm_email(email)
+
+
 def find_open(email: str) -> dict | None:
     """该邮箱的未终态机构名(assigned/failed)。多条时取最近一条。"""
+    email = _clean_email(email)
     found = [it for it in _load()
-             if it.get("email") == email and it.get("status") in _OPEN]
+             if _email_eq(it.get("email"), email) and it.get("status") in _OPEN]
     if not found:
         return None
     found.sort(key=lambda it: it.get("at") or "", reverse=True)
@@ -125,8 +136,9 @@ def allocate(email: str) -> dict | None:
     """
     items = _load()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    email = _clean_email(email)
     open_idx = [i for i, it in enumerate(items)
-                if it.get("email") == email and it.get("status") in _OPEN]
+                if _email_eq(it.get("email"), email) and it.get("status") in _OPEN]
     if open_idx:
         open_idx.sort(key=lambda i: items[i].get("at") or "", reverse=True)
         keep = open_idx[0]
@@ -161,7 +173,7 @@ def mark(name: str, email: str, status: str, note: str = "") -> None:
     items = _load()
     for it in items:
         if it["name"] == name:
-            it.update(status=status, email=email,
+            it.update(status=status, email=_clean_email(email),
                       at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"), note=note)
     _save(items)
 

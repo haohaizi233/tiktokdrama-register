@@ -1541,11 +1541,16 @@ def convert_image(
         source=arbitration.source,
         field_failures=arbitration.field_failures,
     )
-    if not arbitration.passed:
-        LOG.warning("出PDF前语义仲裁未通过: %s", "; ".join(arbitration.reasons[:4]))
+    canonical_dict = canonical.to_translation_input()
+    reject = _arbitration_fail_reason({
+        "fields": canonical_dict,
+        "english": english,
+        "needs_review": list(canonical.needs_review),
+        "arbitration": arbitration.to_dict(),
+    })
+    if reject:
+        LOG.warning("出PDF前未过关: %s", reject)
         # 失败不落 PDF: 否则执照库里会留下失败稿, 二次翻译过了又多一份, 认证抽卡
-        display = _display_view(oriented, lines, meta)
-        canonical_dict = canonical.to_translation_input()
         result = {
             "input": str(image_path),
             "output": "",
@@ -1579,7 +1584,7 @@ def convert_image(
             work_dir.mkdir(parents=True, exist_ok=True)
             sidecar = work_dir / ((Path(output_path).stem or "rejected") + ".json")
             sidecar.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        LOG.info("仲裁未过, 未生成 PDF  %s", image_path)
+        LOG.info("未过关, 未生成 PDF  %s", image_path)
         return result
 
     display = _display_view(oriented, lines, meta)
@@ -1594,7 +1599,6 @@ def convert_image(
         qr_bytes=qr_bytes,
         translation_date=translation_date,
     )
-    canonical_dict = canonical.to_translation_input()
     result = {
         "input": str(image_path),
         "output": str(output_path),
@@ -1697,15 +1701,25 @@ def _en_pdf_paths(folder: Path) -> list[Path]:
 
 
 def _has_id_pair(folder: Path) -> bool:
+    """新版 id-正面/反面, 旧版 *-正面/*-反面 都算齐."""
     if not folder.is_dir():
         return False
     stems = {p.stem for p in folder.iterdir() if p.is_file()}
-    return ("id-正面" in stems or "id_正面" in stems) and (
-        "id-反面" in stems or "id_反面" in stems)
+    front = any(
+        s in {"id-正面", "id_正面"} or s.endswith("-正面") or s.endswith("_正面")
+        for s in stems)
+    back = any(
+        s in {"id-反面", "id_反面"} or s.endswith("-反面") or s.endswith("_反面")
+        for s in stems)
+    return front and back
 
 
 def _folder_ready_to_move(folder: Path) -> bool:
-    """翻译已成功但上次没搬走: 有 cn_meta + 英文版 PDF + 身份证正反面。"""
+    """翻译已成功但没搬走: 英文版 PDF + 身份证 + cn_meta.
+
+    cn_meta 仍要求: 旧版失败时也会落英文 PDF, 没有 meta 不能当成功稿搬进资料.
+    旧版 meta 可以没有 license_pdf 字段.
+    """
     if not folder.is_dir():
         return False
     if not (folder / CN_META_NAME).is_file():
@@ -1749,6 +1763,20 @@ def _recover_ready_folders(source: Path, dest: Path, log=None) -> int:
         if not folder.is_dir() or folder.name in {"资料不全"}:
             continue
         if not _folder_ready_to_move(folder):
+            continue
+        try:
+            meta = json.loads((folder / CN_META_NAME).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, TypeError):
+            meta = {}
+        keep_name = (meta.get("license_pdf") or "") if isinstance(meta, dict) else ""
+        keep = None
+        if keep_name:
+            cand = folder / keep_name
+            if cand.is_file():
+                keep = cand
+        if keep is not None:
+            _purge_en_pdfs(folder, keep=keep)
+        elif not _en_pdf_paths(folder):
             continue
         try:
             target = _move_company_folder(folder, dest)
